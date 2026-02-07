@@ -1737,6 +1737,44 @@ view_traffic_usage() {
       for ((i=0; i<empty; i++)); do bar+="░"; done
       printf "│ %-67s │\n" "  [${bar}]"
     fi
+    
+    # Show port-specific limits for this GRE
+    for port_cfg in "${LIMIT_DIR}"/gre${id}_port*.conf; do
+      [[ -f "$port_cfg" ]] || continue
+      
+      source "$port_cfg"
+      [[ "$LIMIT_TYPE" != "port" ]] && continue
+      
+      local p_rx p_tx p_used p_percent p_enabled
+      read -r p_rx p_tx <<< "$(get_port_traffic "$id" "$PORT")"
+      
+      local p_used_rx=$((p_rx - BASE_RX))
+      local p_used_tx=$((p_tx - BASE_TX))
+      ((p_used_rx < 0)) && p_used_rx=0
+      ((p_used_tx < 0)) && p_used_tx=0
+      
+      case "${CALC_MODE:-both}" in
+        rx) p_used=$p_used_rx ;;
+        tx) p_used=$p_used_tx ;;
+        both|*) p_used=$((p_used_rx + p_used_tx)) ;;
+      esac
+      
+      p_percent=$(awk "BEGIN {printf \"%.1f\", ($p_used/$LIMIT_BYTES)*100}")
+      [[ "$ENABLED" == "1" ]] && p_enabled="ON" || p_enabled="OFF"
+      
+      printf "│ %-67s │\n" "  ├─ Port ${PORT}: Limit ${p_enabled}"
+      printf "│ %-67s │\n" "  │  Used: $(bytes_to_human $p_used) / $(bytes_to_human $LIMIT_BYTES) (${p_percent}%)"
+      
+      # Mini progress bar
+      local p_bar_len=30
+      local p_filled=$(awk "BEGIN {printf \"%.0f\", ($p_percent/100)*$p_bar_len}")
+      ((p_filled > p_bar_len)) && p_filled=$p_bar_len
+      local p_empty=$((p_bar_len - p_filled))
+      local p_bar=""
+      for ((i=0; i<p_filled; i++)); do p_bar+="█"; done
+      for ((i=0; i<p_empty; i++)); do p_bar+="░"; done
+      printf "│ %-67s │\n" "  │  [${p_bar}]"
+    done
   done
   
   echo "└─────────────────────────────────────────────────────────────────────┘"
