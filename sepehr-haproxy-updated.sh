@@ -1395,6 +1395,41 @@ set_traffic_limit() {
   add_log "GRE selected: GRE${id}"
   render
   
+  # Ask: Entire tunnel or specific port?
+  local limit_type=""
+  while true; do
+    render
+    echo "┌─────────────────────────────────────────────────────────────────────┐"
+    echo "│                    LIMIT TYPE - GRE${id}                              │"
+    echo "├─────────────────────────────────────────────────────────────────────┤"
+    printf "│ %-67s │\n" "Apply limit to:"
+    echo "└─────────────────────────────────────────────────────────────────────┘"
+    echo
+    echo "1) Entire Tunnel (all traffic)"
+    echo "2) Specific Port"
+    echo "0) Back"
+    echo
+    read -r -e -p "Select: " limit_type
+    limit_type="$(trim "$limit_type")"
+    
+    case "$limit_type" in
+      1) limit_type="tunnel"; break ;;
+      2) limit_type="port"; break ;;
+      0) return 0 ;;
+      *) add_log "Invalid selection" ;;
+    esac
+  done
+  
+  if [[ "$limit_type" == "tunnel" ]]; then
+    set_tunnel_limit "$id"
+  else
+    set_port_limit "$id"
+  fi
+}
+
+set_tunnel_limit() {
+  local id="$1"
+  
   # Check if tunnel is up
   if [[ ! -d "/sys/class/net/gre${id}" ]]; then
     die_soft "GRE${id} interface not found. Is the tunnel running?"
@@ -1412,7 +1447,7 @@ set_traffic_limit() {
   while true; do
     render
     echo "┌─────────────────────────────────────────────────────────────────────┐"
-    echo "│                    SET TRAFFIC LIMIT - GRE${id}                       │"
+    echo "│                SET TUNNEL LIMIT - GRE${id}                            │"
     echo "├─────────────────────────────────────────────────────────────────────┤"
     printf "│ %-67s │\n" "Current RX (Download): $(bytes_to_human $current_rx)"
     printf "│ %-67s │\n" "Current TX (Upload): $(bytes_to_human $current_tx)"
@@ -1461,22 +1496,156 @@ set_traffic_limit() {
   local limit_bytes
   limit_bytes=$(gb_to_bytes "$limit_gb")
   
-  # Save config (reset counter from current values)
+  # Save config
   save_limit_config "$id" "$limit_bytes" "$current_rx" "$current_tx" "1" "$calc_mode"
   
-  add_log "Traffic limit set: ${limit_gb} GB ($(calc_mode_to_text $calc_mode))"
+  add_log "Tunnel limit set: ${limit_gb} GB"
   
   render
   echo "┌─────────────────────────────────────────────────────────────────────┐"
-  echo "│                    TRAFFIC LIMIT CONFIGURED                        │"
+  echo "│                    TUNNEL LIMIT CONFIGURED                         │"
   echo "├─────────────────────────────────────────────────────────────────────┤"
   printf "│ %-67s │\n" "Tunnel: GRE${id}"
+  printf "│ %-67s │\n" "Type: Entire Tunnel"
   printf "│ %-67s │\n" "Limit: ${limit_gb} GB"
   printf "│ %-67s │\n" "Mode: $(calc_mode_to_text $calc_mode)"
   printf "│ %-67s │\n" "Status: ENABLED"
   echo "└─────────────────────────────────────────────────────────────────────┘"
   echo
   echo "The tunnel will automatically STOP when limit is reached."
+  pause_enter
+}
+
+set_port_limit() {
+  local id="$1"
+  
+  # Get ports for this GRE
+  local -a existing_ports
+  mapfile -t existing_ports < <(get_gre_ports "$id")
+  
+  if ((${#existing_ports[@]} == 0)); then
+    die_soft "No ports found for GRE${id}."
+    return 0
+  fi
+  
+  # Show available ports
+  render
+  echo "┌─────────────────────────────────────────────────────────────────────┐"
+  echo "│                  AVAILABLE PORTS - GRE${id}                           │"
+  echo "├─────────────────────────────────────────────────────────────────────┤"
+  printf "│ %-67s │\n" "Ports: ${existing_ports[*]}"
+  echo "└─────────────────────────────────────────────────────────────────────┘"
+  echo
+  
+  # Ask for port
+  local port=""
+  while true; do
+    read -r -e -p "Enter port number to limit: " port
+    port="$(trim "$port")"
+    
+    if [[ -z "$port" ]]; then
+      add_log "Empty input."
+      continue
+    fi
+    
+    if ! valid_port "$port"; then
+      add_log "Invalid port: $port"
+      continue
+    fi
+    
+    # Check if port exists in haproxy config
+    local found=0
+    for p in "${existing_ports[@]}"; do
+      [[ "$p" == "$port" ]] && found=1 && break
+    done
+    
+    if ((found == 0)); then
+      add_log "Port $port not found in GRE${id} config."
+      continue
+    fi
+    
+    break
+  done
+  
+  # Setup iptables counter for this port
+  add_log "Setting up traffic counter for port $port..."
+  setup_port_counter "$id" "$port"
+  
+  # Get current traffic (will be 0 for new counter)
+  local traffic_info
+  traffic_info=$(get_port_traffic "$id" "$port")
+  local current_rx current_tx
+  read -r current_rx current_tx <<< "$traffic_info"
+  
+  # Ask for limit
+  local limit_gb=""
+  while true; do
+    render
+    echo "┌─────────────────────────────────────────────────────────────────────┐"
+    echo "│              SET PORT LIMIT - GRE${id} PORT ${port}                     │"
+    echo "├─────────────────────────────────────────────────────────────────────┤"
+    printf "│ %-67s │\n" "Current RX: $(bytes_to_human $current_rx)"
+    printf "│ %-67s │\n" "Current TX: $(bytes_to_human $current_tx)"
+    echo "└─────────────────────────────────────────────────────────────────────┘"
+    echo
+    read -r -e -p "Enter traffic limit in GB (e.g., 10 or 5.5): " limit_gb
+    limit_gb="$(trim "$limit_gb")"
+    
+    if [[ -z "$limit_gb" ]]; then
+      add_log "Empty input."
+      continue
+    fi
+    
+    if [[ "$limit_gb" =~ ^[0-9]+\.?[0-9]*$ ]] && awk "BEGIN {exit !($limit_gb > 0)}"; then
+      break
+    else
+      add_log "Invalid input: $limit_gb"
+    fi
+  done
+  
+  # Ask for calculation mode
+  local calc_mode=""
+  while true; do
+    render
+    echo "┌─────────────────────────────────────────────────────────────────────┐"
+    echo "│                    CALCULATION MODE                                │"
+    echo "└─────────────────────────────────────────────────────────────────────┘"
+    echo
+    echo "1) Download Only (RX)"
+    echo "2) Upload Only (TX)"
+    echo "3) Download + Upload (RX+TX)"
+    echo
+    read -r -e -p "Select (1-3): " calc_mode
+    calc_mode="$(trim "$calc_mode")"
+    
+    case "$calc_mode" in
+      1) calc_mode="rx"; break ;;
+      2) calc_mode="tx"; break ;;
+      3) calc_mode="both"; break ;;
+      *) add_log "Invalid selection" ;;
+    esac
+  done
+  
+  local limit_bytes
+  limit_bytes=$(gb_to_bytes "$limit_gb")
+  
+  # Save port config
+  save_port_limit_config "$id" "$port" "$limit_bytes" "$current_rx" "$current_tx" "1" "$calc_mode"
+  
+  add_log "Port limit set: ${limit_gb} GB for port $port"
+  
+  render
+  echo "┌─────────────────────────────────────────────────────────────────────┐"
+  echo "│                    PORT LIMIT CONFIGURED                           │"
+  echo "├─────────────────────────────────────────────────────────────────────┤"
+  printf "│ %-67s │\n" "Tunnel: GRE${id}"
+  printf "│ %-67s │\n" "Port: ${port}"
+  printf "│ %-67s │\n" "Limit: ${limit_gb} GB"
+  printf "│ %-67s │\n" "Mode: $(calc_mode_to_text $calc_mode)"
+  printf "│ %-67s │\n" "Status: ENABLED"
+  echo "└─────────────────────────────────────────────────────────────────────┘"
+  echo
+  echo "The port will be BLOCKED when limit is reached."
   pause_enter
 }
 
