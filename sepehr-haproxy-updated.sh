@@ -1273,8 +1273,8 @@ set_traffic_limit() {
     echo "┌─────────────────────────────────────────────────────────────────────┐"
     echo "│                    SET TRAFFIC LIMIT - GRE${id}                       │"
     echo "├─────────────────────────────────────────────────────────────────────┤"
-    printf "│ %-67s │\n" "Current RX: $(bytes_to_human $current_rx)"
-    printf "│ %-67s │\n" "Current TX: $(bytes_to_human $current_tx)"
+    printf "│ %-67s │\n" "Current RX (Download): $(bytes_to_human $current_rx)"
+    printf "│ %-67s │\n" "Current TX (Upload): $(bytes_to_human $current_tx)"
     echo "└─────────────────────────────────────────────────────────────────────┘"
     echo
     read -r -e -p "Enter traffic limit in GB (e.g., 10 or 5.5): " limit_gb
@@ -1292,13 +1292,38 @@ set_traffic_limit() {
     fi
   done
   
+  # Ask for calculation mode
+  local calc_mode=""
+  while true; do
+    render
+    echo "┌─────────────────────────────────────────────────────────────────────┐"
+    echo "│                    CALCULATION MODE - GRE${id}                        │"
+    echo "├─────────────────────────────────────────────────────────────────────┤"
+    printf "│ %-67s │\n" "How should traffic be calculated?"
+    echo "└─────────────────────────────────────────────────────────────────────┘"
+    echo
+    echo "1) Download Only (RX)        - فقط دانلود"
+    echo "2) Upload Only (TX)          - فقط آپلود"
+    echo "3) Download + Upload (RX+TX) - دانلود + آپلود"
+    echo
+    read -r -e -p "Select (1-3): " calc_mode
+    calc_mode="$(trim "$calc_mode")"
+    
+    case "$calc_mode" in
+      1) calc_mode="rx"; break ;;
+      2) calc_mode="tx"; break ;;
+      3) calc_mode="both"; break ;;
+      *) add_log "Invalid selection: $calc_mode" ;;
+    esac
+  done
+  
   local limit_bytes
   limit_bytes=$(gb_to_bytes "$limit_gb")
   
   # Save config (reset counter from current values)
-  save_limit_config "$id" "$limit_bytes" "$current_rx" "$current_tx" "1"
+  save_limit_config "$id" "$limit_bytes" "$current_rx" "$current_tx" "1" "$calc_mode"
   
-  add_log "Traffic limit set: ${limit_gb} GB for GRE${id}"
+  add_log "Traffic limit set: ${limit_gb} GB ($(calc_mode_to_text $calc_mode))"
   
   render
   echo "┌─────────────────────────────────────────────────────────────────────┐"
@@ -1306,8 +1331,8 @@ set_traffic_limit() {
   echo "├─────────────────────────────────────────────────────────────────────┤"
   printf "│ %-67s │\n" "Tunnel: GRE${id}"
   printf "│ %-67s │\n" "Limit: ${limit_gb} GB"
+  printf "│ %-67s │\n" "Mode: $(calc_mode_to_text $calc_mode)"
   printf "│ %-67s │\n" "Status: ENABLED"
-  printf "│ %-67s │\n" "Counter reset from current traffic values"
   echo "└─────────────────────────────────────────────────────────────────────┘"
   echo
   echo "The tunnel will automatically STOP when limit is reached."
