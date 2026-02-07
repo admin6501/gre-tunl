@@ -1063,10 +1063,10 @@ main_menu() {
   local choice=""
   while true; do
     render
-    echo "1 > IRAN SETUP"
-    echo "2 > KHAREJ SETUP"
-    echo "3 > Services ManageMent"
-    echo "4 > Unistall & Clean"
+    echo "1 > IRAN Setup"
+    echo "2 > KHAREJ Setup"
+    echo "3 > Services Management"
+    echo "4 > Uninstall & Clean"
     echo "5 > Add Tunnel Port"
     echo "6 > Remove Tunnel Port"
     echo "0 > Exit"
@@ -1075,12 +1075,12 @@ main_menu() {
     choice="$(trim "$choice")"
 
     case "$choice" in
-      1) add_log "Selected: IRAN SETUP"; iran_setup ;;
-      2) add_log "Selected: KHAREJ SETUP"; kharej_setup ;;
-      3) add_log "Selected: Services ManageMent"; services_management ;;
-      4) add_log "Selected: Unistall & Clean"; uninstall_clean ;;
-      5) add_log "Selected: add tunnel port"; add_tunnel_port ;;
-      6) add_log "Selected: remove tunnel port"; remove_tunnel_port ;;
+      1) add_log "Selected: IRAN Setup"; iran_setup ;;
+      2) add_log "Selected: KHAREJ Setup"; kharej_setup ;;
+      3) add_log "Selected: Services Management"; services_management ;;
+      4) add_log "Selected: Uninstall & Clean"; uninstall_clean ;;
+      5) add_log "Selected: Add Tunnel Port"; add_tunnel_port ;;
+      6) add_log "Selected: Remove Tunnel Port"; remove_tunnel_port ;;
       0) add_log "Bye!"; render; exit 0 ;;
       *) add_log "Invalid option: $choice" ;;
     esac
