@@ -1220,7 +1220,7 @@ BASE_RX=${base_rx}
 BASE_TX=${base_tx}
 ENABLED=${enabled}
 CALC_MODE=${calc_mode}
-CREATED=$(date +"%Y-%m-%d %H:%M:%S")
+CREATED="$(date +"%Y-%m-%d_%H:%M:%S")"
 EOF
 }
 
