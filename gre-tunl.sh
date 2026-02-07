@@ -1994,37 +1994,70 @@ remove_traffic_limit() {
   render
   
   mapfile -t GRE_IDS < <(get_gre_ids)
-  local -a GRE_LABELS=()
-  local id has_any=0
+  
+  if ((${#GRE_IDS[@]} == 0)); then
+    die_soft "No GRE tunnels found."
+    return 0
+  fi
+  
+  # Build list of all limits (tunnel + port)
+  local -a LIMIT_LABELS=()
+  local -a LIMIT_TYPES=()
+  local -a LIMIT_IDS=()
+  local -a LIMIT_PORTS=()
+  
+  local id
   for id in "${GRE_IDS[@]}"; do
+    # Check tunnel limit
     local cfg="${LIMIT_DIR}/gre${id}.conf"
     if [[ -f "$cfg" ]]; then
-      GRE_LABELS+=("GRE${id}")
-      has_any=1
+      LIMIT_LABELS+=("GRE${id} - Entire Tunnel")
+      LIMIT_TYPES+=("tunnel")
+      LIMIT_IDS+=("$id")
+      LIMIT_PORTS+=("")
     fi
+    
+    # Check port limits
+    for port_cfg in "${LIMIT_DIR}"/gre${id}_port*.conf; do
+      [[ -f "$port_cfg" ]] || continue
+      source "$port_cfg"
+      LIMIT_LABELS+=("GRE${id} - Port ${PORT}")
+      LIMIT_TYPES+=("port")
+      LIMIT_IDS+=("$id")
+      LIMIT_PORTS+=("$PORT")
+    done
   done
-
-  if ((has_any == 0)); then
-    die_soft "No traffic limits configured for any tunnel."
-    return 0
-  fi
-
-  if ! menu_select_index "Remove Traffic Limit" "Select GRE:" "${GRE_LABELS[@]}"; then
-    return 0
-  fi
-
-  local idx="$MENU_SELECTED"
-  # Find actual ID from label
-  local label="${GRE_LABELS[$idx]}"
-  id="${label#GRE}"
   
+  if ((${#LIMIT_LABELS[@]} == 0)); then
+    die_soft "No traffic limits configured."
+    return 0
+  fi
+  
+  if ! menu_select_index "Remove Traffic Limit" "Select limit to remove:" "${LIMIT_LABELS[@]}"; then
+    return 0
+  fi
+  
+  local idx="$MENU_SELECTED"
+  local limit_type="${LIMIT_TYPES[$idx]}"
+  id="${LIMIT_IDS[$idx]}"
+  local port="${LIMIT_PORTS[$idx]}"
+  
+  if [[ "$limit_type" == "tunnel" ]]; then
+    remove_tunnel_limit "$id"
+  else
+    remove_port_limit "$id" "$port"
+  fi
+}
+
+remove_tunnel_limit() {
+  local id="$1"
   local cfg="${LIMIT_DIR}/gre${id}.conf"
   
   # Confirmation
   while true; do
     render
     echo "┌─────────────────────────────────────────────────────────────────────┐"
-    echo "│                    REMOVE TRAFFIC LIMIT                            │"
+    echo "│                    REMOVE TUNNEL LIMIT                             │"
     echo "├─────────────────────────────────────────────────────────────────────┤"
     printf "│ %-67s │\n" "Tunnel: GRE${id}"
     printf "│ %-67s │\n" "This will REMOVE the traffic limit completely."
@@ -2063,7 +2096,7 @@ remove_traffic_limit() {
   
   render
   echo "┌─────────────────────────────────────────────────────────────────────┐"
-  echo "│                    TRAFFIC LIMIT REMOVED                           │"
+  echo "│                    TUNNEL LIMIT REMOVED                            │"
   echo "├─────────────────────────────────────────────────────────────────────┤"
   printf "│ %-67s │\n" "Tunnel: GRE${id}"
   printf "│ %-67s │\n" "Limit config removed"
@@ -2072,6 +2105,58 @@ remove_traffic_limit() {
   else
     printf "│ %-67s │\n" "Tunnel status: STOPPED (start manually)"
   fi
+  echo "└─────────────────────────────────────────────────────────────────────┘"
+  pause_enter
+}
+
+remove_port_limit() {
+  local id="$1"
+  local port="$2"
+  local cfg="${LIMIT_DIR}/gre${id}_port${port}.conf"
+  
+  # Confirmation
+  while true; do
+    render
+    echo "┌─────────────────────────────────────────────────────────────────────┐"
+    echo "│                    REMOVE PORT LIMIT                               │"
+    echo "├─────────────────────────────────────────────────────────────────────┤"
+    printf "│ %-67s │\n" "Tunnel: GRE${id} - Port ${port}"
+    printf "│ %-67s │\n" "This will REMOVE the port limit and UNBLOCK the port."
+    echo "└─────────────────────────────────────────────────────────────────────┘"
+    echo
+    echo "Type: YES (confirm)  or  NO (cancel)"
+    local confirm=""
+    read -r -e -p "Confirm: " confirm
+    confirm="$(trim "$confirm")"
+    
+    if [[ "$confirm" == "NO" || "$confirm" == "no" ]]; then
+      add_log "Remove limit cancelled for GRE${id} port ${port}"
+      return 0
+    fi
+    if [[ "$confirm" == "YES" ]]; then
+      break
+    fi
+    add_log "Please type YES or NO."
+  done
+  
+  # Remove config file
+  rm -f "$cfg" 2>/dev/null || true
+  
+  # Unblock port
+  unblock_port "$port"
+  
+  # Remove iptables counter chains
+  remove_port_counter "$id" "$port"
+  
+  add_log "Port limit removed for GRE${id} port ${port}"
+  
+  render
+  echo "┌─────────────────────────────────────────────────────────────────────┐"
+  echo "│                    PORT LIMIT REMOVED                              │"
+  echo "├─────────────────────────────────────────────────────────────────────┤"
+  printf "│ %-67s │\n" "Tunnel: GRE${id} - Port ${port}"
+  printf "│ %-67s │\n" "Limit config removed"
+  printf "│ %-67s │\n" "Port status: UNBLOCKED"
   echo "└─────────────────────────────────────────────────────────────────────┘"
   pause_enter
 }
