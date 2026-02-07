@@ -1302,9 +1302,9 @@ set_traffic_limit() {
     printf "│ %-67s │\n" "How should traffic be calculated?"
     echo "└─────────────────────────────────────────────────────────────────────┘"
     echo
-    echo "1) Download Only (RX)        - فقط دانلود"
-    echo "2) Upload Only (TX)          - فقط آپلود"
-    echo "3) Download + Upload (RX+TX) - دانلود + آپلود"
+    echo "1) Download Only (RX)"
+    echo "2) Upload Only (TX)"
+    echo "3) Download + Upload (RX+TX)"
     echo
     read -r -e -p "Select (1-3): " calc_mode
     calc_mode="$(trim "$calc_mode")"
