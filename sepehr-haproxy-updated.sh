@@ -1500,7 +1500,7 @@ reset_traffic_counter() {
   done
   
   # Save new config with current values as base (reset counter)
-  save_limit_config "$id" "$limit_bytes" "$rx" "$tx" "1"
+  save_limit_config "$id" "$limit_bytes" "$rx" "$tx" "1" "$calc_mode"
   
   # Restart tunnel if it was stopped
   if [[ ! -d "/sys/class/net/gre${id}" ]]; then
@@ -1516,6 +1516,7 @@ reset_traffic_counter() {
   echo "├─────────────────────────────────────────────────────────────────────┤"
   printf "│ %-67s │\n" "Tunnel: GRE${id}"
   printf "│ %-67s │\n" "Limit: $(bytes_to_human $limit_bytes)"
+  printf "│ %-67s │\n" "Mode: $(calc_mode_to_text $calc_mode)"
   printf "│ %-67s │\n" "Used: 0 B (reset)"
   printf "│ %-67s │\n" "Status: ENABLED"
   echo "└─────────────────────────────────────────────────────────────────────┘"
