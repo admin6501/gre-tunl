@@ -2291,5 +2291,5 @@ main_menu() {
 }
 
 ensure_root "$@"
-add_log "SEPEHR GRE+FORWARDER installer (HAProxy mode)."
+add_log "GRE TUNL - Tunnel Manager"
 main_menu
