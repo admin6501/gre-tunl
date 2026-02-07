@@ -1781,35 +1781,82 @@ view_traffic_usage() {
   pause_enter
 }
 
+# Get list of port limits for a GRE
+get_port_limits() {
+  local id="$1"
+  local -a ports=()
+  for cfg in "${LIMIT_DIR}"/gre${id}_port*.conf; do
+    [[ -f "$cfg" ]] || continue
+    local port=$(basename "$cfg" | sed "s/gre${id}_port\([0-9]*\)\.conf/\1/")
+    ports+=("$port")
+  done
+  printf "%s\n" "${ports[@]}" | sort -n
+}
+
 reset_traffic_counter() {
   render
   add_log "Selected: Reset Traffic Counter"
   render
   
   mapfile -t GRE_IDS < <(get_gre_ids)
-  local -a GRE_LABELS=()
+  
+  if ((${#GRE_IDS[@]} == 0)); then
+    die_soft "No GRE tunnels found."
+    return 0
+  fi
+  
+  # Build list of all limits (tunnel + port)
+  local -a LIMIT_LABELS=()
+  local -a LIMIT_TYPES=()
+  local -a LIMIT_IDS=()
+  local -a LIMIT_PORTS=()
+  
   local id
   for id in "${GRE_IDS[@]}"; do
+    # Check tunnel limit
     local cfg="${LIMIT_DIR}/gre${id}.conf"
     if [[ -f "$cfg" ]]; then
-      GRE_LABELS+=("GRE${id} (has limit)")
-    else
-      GRE_LABELS+=("GRE${id} (no limit)")
+      LIMIT_LABELS+=("GRE${id} - Entire Tunnel")
+      LIMIT_TYPES+=("tunnel")
+      LIMIT_IDS+=("$id")
+      LIMIT_PORTS+=("")
     fi
+    
+    # Check port limits
+    for port_cfg in "${LIMIT_DIR}"/gre${id}_port*.conf; do
+      [[ -f "$port_cfg" ]] || continue
+      source "$port_cfg"
+      LIMIT_LABELS+=("GRE${id} - Port ${PORT}")
+      LIMIT_TYPES+=("port")
+      LIMIT_IDS+=("$id")
+      LIMIT_PORTS+=("$PORT")
+    done
   done
-
-  if ! menu_select_index "Reset Traffic Counter" "Select GRE:" "${GRE_LABELS[@]}"; then
-    return 0
-  fi
-
-  local idx="$MENU_SELECTED"
-  id="${GRE_IDS[$idx]}"
   
-  local cfg="${LIMIT_DIR}/gre${id}.conf"
-  if [[ ! -f "$cfg" ]]; then
-    die_soft "No traffic limit configured for GRE${id}. Set a limit first."
+  if ((${#LIMIT_LABELS[@]} == 0)); then
+    die_soft "No traffic limits configured."
     return 0
   fi
+  
+  if ! menu_select_index "Reset Traffic Counter" "Select limit to reset:" "${LIMIT_LABELS[@]}"; then
+    return 0
+  fi
+  
+  local idx="$MENU_SELECTED"
+  local limit_type="${LIMIT_TYPES[$idx]}"
+  id="${LIMIT_IDS[$idx]}"
+  local port="${LIMIT_PORTS[$idx]}"
+  
+  if [[ "$limit_type" == "tunnel" ]]; then
+    reset_tunnel_counter "$id"
+  else
+    reset_port_counter "$id" "$port"
+  fi
+}
+
+reset_tunnel_counter() {
+  local id="$1"
+  local cfg="${LIMIT_DIR}/gre${id}.conf"
   
   # Get current traffic values
   local traffic_info rx tx
@@ -1825,7 +1872,7 @@ reset_traffic_counter() {
   while true; do
     render
     echo "┌─────────────────────────────────────────────────────────────────────┐"
-    echo "│                    RESET TRAFFIC COUNTER                           │"
+    echo "│                    RESET TUNNEL COUNTER                            │"
     echo "├─────────────────────────────────────────────────────────────────────┤"
     printf "│ %-67s │\n" "Tunnel: GRE${id}"
     printf "│ %-67s │\n" "This will reset the usage counter to ZERO"
@@ -1867,6 +1914,76 @@ reset_traffic_counter() {
   printf "│ %-67s │\n" "Mode: $(calc_mode_to_text $calc_mode)"
   printf "│ %-67s │\n" "Used: 0 B (reset)"
   printf "│ %-67s │\n" "Status: ENABLED"
+  echo "└─────────────────────────────────────────────────────────────────────┘"
+  pause_enter
+}
+
+reset_port_counter() {
+  local id="$1"
+  local port="$2"
+  local cfg="${LIMIT_DIR}/gre${id}_port${port}.conf"
+  
+  # Read current limit
+  source "$cfg"
+  local limit_bytes="${LIMIT_BYTES:-0}"
+  local calc_mode="${CALC_MODE:-both}"
+  
+  # Get current traffic from iptables
+  local traffic_info rx tx
+  traffic_info=$(get_port_traffic "$id" "$port")
+  read -r rx tx <<< "$traffic_info"
+  
+  # Confirmation
+  while true; do
+    render
+    echo "┌─────────────────────────────────────────────────────────────────────┐"
+    echo "│                    RESET PORT COUNTER                              │"
+    echo "├─────────────────────────────────────────────────────────────────────┤"
+    printf "│ %-67s │\n" "Tunnel: GRE${id} - Port ${port}"
+    printf "│ %-67s │\n" "This will reset the usage counter to ZERO"
+    printf "│ %-67s │\n" "and UNBLOCK the port if it was blocked."
+    echo "└─────────────────────────────────────────────────────────────────────┘"
+    echo
+    echo "Type: YES (confirm)  or  NO (cancel)"
+    local confirm=""
+    read -r -e -p "Confirm: " confirm
+    confirm="$(trim "$confirm")"
+    
+    if [[ "$confirm" == "NO" || "$confirm" == "no" ]]; then
+      add_log "Reset cancelled for GRE${id} port ${port}"
+      return 0
+    fi
+    if [[ "$confirm" == "YES" ]]; then
+      break
+    fi
+    add_log "Please type YES or NO."
+  done
+  
+  # Unblock port if blocked
+  unblock_port "$port"
+  add_log "Port ${port} unblocked"
+  
+  # Reset iptables counter by recreating chain
+  setup_port_counter "$id" "$port"
+  
+  # Get new base values (should be 0 or close to it)
+  traffic_info=$(get_port_traffic "$id" "$port")
+  read -r rx tx <<< "$traffic_info"
+  
+  # Save new config
+  save_port_limit_config "$id" "$port" "$limit_bytes" "$rx" "$tx" "1" "$calc_mode"
+  
+  add_log "Traffic counter reset for GRE${id} port ${port}"
+  
+  render
+  echo "┌─────────────────────────────────────────────────────────────────────┐"
+  echo "│                    PORT COUNTER RESET COMPLETED                    │"
+  echo "├─────────────────────────────────────────────────────────────────────┤"
+  printf "│ %-67s │\n" "Tunnel: GRE${id} - Port ${port}"
+  printf "│ %-67s │\n" "Limit: $(bytes_to_human $limit_bytes)"
+  printf "│ %-67s │\n" "Mode: $(calc_mode_to_text $calc_mode)"
+  printf "│ %-67s │\n" "Used: 0 B (reset)"
+  printf "│ %-67s │\n" "Status: ENABLED (port unblocked)"
   echo "└─────────────────────────────────────────────────────────────────────┘"
   pause_enter
 }
