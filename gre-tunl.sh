@@ -1928,11 +1928,34 @@ remove_traffic_limit() {
     add_log "Please type YES or NO."
   done
   
+  # Remove config file
   rm -f "$cfg" 2>/dev/null || true
   add_log "Traffic limit removed for GRE${id}"
   
+  # Start tunnel if it was stopped
+  if [[ ! -d "/sys/class/net/gre${id}" ]]; then
+    add_log "Starting GRE${id} tunnel..."
+    systemctl start "gre${id}.service" >/dev/null 2>&1 || true
+    sleep 1
+    if [[ -d "/sys/class/net/gre${id}" ]]; then
+      add_log "GRE${id} tunnel started successfully."
+    else
+      add_log "WARNING: Failed to start GRE${id} tunnel."
+    fi
+  fi
+  
   render
-  echo "Traffic limit removed for GRE${id}"
+  echo "┌─────────────────────────────────────────────────────────────────────┐"
+  echo "│                    TRAFFIC LIMIT REMOVED                           │"
+  echo "├─────────────────────────────────────────────────────────────────────┤"
+  printf "│ %-67s │\n" "Tunnel: GRE${id}"
+  printf "│ %-67s │\n" "Limit config removed"
+  if [[ -d "/sys/class/net/gre${id}" ]]; then
+    printf "│ %-67s │\n" "Tunnel status: RUNNING"
+  else
+    printf "│ %-67s │\n" "Tunnel status: STOPPED (start manually)"
+  fi
+  echo "└─────────────────────────────────────────────────────────────────────┘"
   pause_enter
 }
 
