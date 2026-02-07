@@ -1396,10 +1396,26 @@ view_traffic_usage() {
     
     printf "│ %-67s │\n" "─────────────────────────────────────────────────────────────────"
     printf "│ %-67s │\n" "GRE${id} [${status}]  Limit: ${enabled}"
-    printf "│ %-67s │\n" "  Total RX: $(bytes_to_human $rx)"
-    printf "│ %-67s │\n" "  Total TX: $(bytes_to_human $tx)"
+    printf "│ %-67s │\n" "  Total RX (Download): $(bytes_to_human $rx)"
+    printf "│ %-67s │\n" "  Total TX (Upload): $(bytes_to_human $tx)"
     if [[ -f "$cfg" ]] && ((limit_bytes > 0)); then
-      printf "│ %-67s │\n" "  Used (since reset): $(bytes_to_human $used) / ${limit_str} (${percent}%)"
+      local calc_mode="${CALC_MODE:-both}"
+      local used_rx=$((rx - base_rx))
+      local used_tx=$((tx - base_tx))
+      ((used_rx < 0)) && used_rx=0
+      ((used_tx < 0)) && used_tx=0
+      
+      # Calculate based on mode
+      case "$calc_mode" in
+        rx) used=$used_rx ;;
+        tx) used=$used_tx ;;
+        both|*) used=$((used_rx + used_tx)) ;;
+      esac
+      
+      percent=$(awk "BEGIN {printf \"%.1f\", ($used/$limit_bytes)*100}")
+      
+      printf "│ %-67s │\n" "  Mode: $(calc_mode_to_text $calc_mode)"
+      printf "│ %-67s │\n" "  Used: $(bytes_to_human $used) / ${limit_str} (${percent}%)"
       
       # Progress bar
       local bar_len=40
