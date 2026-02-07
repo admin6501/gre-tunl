@@ -589,7 +589,7 @@ services_management() {
 
   while true; do
     render
-    echo "Services ManageMent"
+    echo "Services Management"
     echo
     echo "1) GRE"
     echo "2) HAPROXY"
