@@ -1528,6 +1528,237 @@ remove_traffic_limit() {
   pause_enter
 }
 
+edit_traffic_limit() {
+  render
+  add_log "Selected: Edit Traffic Limit"
+  render
+  
+  mapfile -t GRE_IDS < <(get_gre_ids)
+  local -a GRE_LABELS=()
+  local id has_any=0
+  for id in "${GRE_IDS[@]}"; do
+    local cfg="${LIMIT_DIR}/gre${id}.conf"
+    if [[ -f "$cfg" ]]; then
+      source "$cfg"
+      local limit_hr="$(bytes_to_human ${LIMIT_BYTES:-0})"
+      GRE_LABELS+=("GRE${id} (${limit_hr})")
+      has_any=1
+    fi
+  done
+
+  if ((has_any == 0)); then
+    die_soft "No traffic limits configured. Use 'Set Traffic Limit' first."
+    return 0
+  fi
+
+  if ! menu_select_index "Edit Traffic Limit" "Select GRE:" "${GRE_LABELS[@]}"; then
+    return 0
+  fi
+
+  local idx="$MENU_SELECTED"
+  local label="${GRE_LABELS[$idx]}"
+  id=$(echo "$label" | grep -oP 'GRE\K[0-9]+')
+  
+  local cfg="${LIMIT_DIR}/gre${id}.conf"
+  source "$cfg"
+  
+  local old_limit_bytes="${LIMIT_BYTES:-0}"
+  local base_rx="${BASE_RX:-0}"
+  local base_tx="${BASE_TX:-0}"
+  local enabled="${ENABLED:-1}"
+  
+  # Get current usage
+  local traffic_info rx tx used_rx used_tx used
+  traffic_info=$(get_tunnel_traffic "$id")
+  read -r rx tx <<< "$traffic_info"
+  used_rx=$((rx - base_rx))
+  used_tx=$((tx - base_tx))
+  ((used_rx < 0)) && used_rx=0
+  ((used_tx < 0)) && used_tx=0
+  used=$((used_rx + used_tx))
+  
+  local new_limit_gb=""
+  while true; do
+    render
+    echo "┌─────────────────────────────────────────────────────────────────────┐"
+    echo "│                    EDIT TRAFFIC LIMIT - GRE${id}                      │"
+    echo "├─────────────────────────────────────────────────────────────────────┤"
+    printf "│ %-67s │\n" "Current Limit: $(bytes_to_human $old_limit_bytes)"
+    printf "│ %-67s │\n" "Used So Far: $(bytes_to_human $used)"
+    printf "│ %-67s │\n" "Status: $( [[ "$enabled" == "1" ]] && echo "ENABLED" || echo "DISABLED" )"
+    echo "├─────────────────────────────────────────────────────────────────────┤"
+    printf "│ %-67s │\n" "NOTE: Changing limit will NOT reset the counter"
+    echo "└─────────────────────────────────────────────────────────────────────┘"
+    echo
+    read -r -e -p "Enter NEW traffic limit in GB (e.g., 20 or 15.5): " new_limit_gb
+    new_limit_gb="$(trim "$new_limit_gb")"
+    
+    if [[ -z "$new_limit_gb" ]]; then
+      add_log "Empty input. Please try again."
+      continue
+    fi
+    
+    if [[ "$new_limit_gb" =~ ^[0-9]+\.?[0-9]*$ ]] && awk "BEGIN {exit !($new_limit_gb > 0)}"; then
+      break
+    else
+      add_log "Invalid input: $new_limit_gb"
+    fi
+  done
+  
+  local new_limit_bytes
+  new_limit_bytes=$(gb_to_bytes "$new_limit_gb")
+  
+  # Save with same base values (keep counter)
+  save_limit_config "$id" "$new_limit_bytes" "$base_rx" "$base_tx" "$enabled"
+  
+  add_log "Traffic limit changed: $(bytes_to_human $old_limit_bytes) -> ${new_limit_gb} GB"
+  
+  render
+  echo "┌─────────────────────────────────────────────────────────────────────┐"
+  echo "│                    TRAFFIC LIMIT UPDATED                           │"
+  echo "├─────────────────────────────────────────────────────────────────────┤"
+  printf "│ %-67s │\n" "Tunnel: GRE${id}"
+  printf "│ %-67s │\n" "Old Limit: $(bytes_to_human $old_limit_bytes)"
+  printf "│ %-67s │\n" "New Limit: ${new_limit_gb} GB"
+  printf "│ %-67s │\n" "Used: $(bytes_to_human $used) (unchanged)"
+  echo "└─────────────────────────────────────────────────────────────────────┘"
+  pause_enter
+}
+
+set_unlimited() {
+  render
+  add_log "Selected: Set Unlimited"
+  render
+  
+  mapfile -t GRE_IDS < <(get_gre_ids)
+  local -a GRE_LABELS=()
+  local id has_any=0
+  for id in "${GRE_IDS[@]}"; do
+    local cfg="${LIMIT_DIR}/gre${id}.conf"
+    if [[ -f "$cfg" ]]; then
+      source "$cfg"
+      local status="ON"
+      [[ "$ENABLED" != "1" ]] && status="OFF"
+      GRE_LABELS+=("GRE${id} - Limit: ${status}")
+      has_any=1
+    fi
+  done
+
+  if ((has_any == 0)); then
+    die_soft "No traffic limits configured. Nothing to set unlimited."
+    return 0
+  fi
+
+  if ! menu_select_index "Set Unlimited (Disable Limit)" "Select GRE:" "${GRE_LABELS[@]}"; then
+    return 0
+  fi
+
+  local idx="$MENU_SELECTED"
+  local label="${GRE_LABELS[$idx]}"
+  id=$(echo "$label" | grep -oP 'GRE\K[0-9]+')
+  
+  local cfg="${LIMIT_DIR}/gre${id}.conf"
+  source "$cfg"
+  
+  if [[ "$ENABLED" != "1" ]]; then
+    die_soft "Limit for GRE${id} is already disabled (unlimited)."
+    return 0
+  fi
+  
+  # Confirmation
+  while true; do
+    render
+    echo "┌─────────────────────────────────────────────────────────────────────┐"
+    echo "│                    SET UNLIMITED - GRE${id}                           │"
+    echo "├─────────────────────────────────────────────────────────────────────┤"
+    printf "│ %-67s │\n" "Current Limit: $(bytes_to_human ${LIMIT_BYTES:-0})"
+    printf "│ %-67s │\n" ""
+    printf "│ %-67s │\n" "This will DISABLE the limit (set to unlimited)"
+    printf "│ %-67s │\n" "The config and counter will be PRESERVED"
+    printf "│ %-67s │\n" "You can re-enable it later with 'Enable Limit'"
+    echo "└─────────────────────────────────────────────────────────────────────┘"
+    echo
+    echo "Type: YES (confirm)  or  NO (cancel)"
+    local confirm=""
+    read -r -e -p "Confirm: " confirm
+    confirm="$(trim "$confirm")"
+    
+    if [[ "$confirm" == "NO" || "$confirm" == "no" ]]; then
+      add_log "Set unlimited cancelled for GRE${id}"
+      return 0
+    fi
+    if [[ "$confirm" == "YES" ]]; then
+      break
+    fi
+    add_log "Please type YES or NO."
+  done
+  
+  # Disable limit
+  sed -i 's/^ENABLED=1/ENABLED=0/' "$cfg"
+  
+  add_log "GRE${id} set to UNLIMITED"
+  
+  render
+  echo "┌─────────────────────────────────────────────────────────────────────┐"
+  echo "│                    UNLIMITED MODE ENABLED                          │"
+  echo "├─────────────────────────────────────────────────────────────────────┤"
+  printf "│ %-67s │\n" "Tunnel: GRE${id}"
+  printf "│ %-67s │\n" "Status: UNLIMITED (limit disabled)"
+  printf "│ %-67s │\n" "Config preserved - can re-enable anytime"
+  echo "└─────────────────────────────────────────────────────────────────────┘"
+  pause_enter
+}
+
+enable_limit() {
+  render
+  add_log "Selected: Enable Limit"
+  render
+  
+  mapfile -t GRE_IDS < <(get_gre_ids)
+  local -a GRE_LABELS=()
+  local id has_any=0
+  for id in "${GRE_IDS[@]}"; do
+    local cfg="${LIMIT_DIR}/gre${id}.conf"
+    if [[ -f "$cfg" ]]; then
+      source "$cfg"
+      if [[ "$ENABLED" != "1" ]]; then
+        GRE_LABELS+=("GRE${id} - $(bytes_to_human ${LIMIT_BYTES:-0})")
+        has_any=1
+      fi
+    fi
+  done
+
+  if ((has_any == 0)); then
+    die_soft "No disabled limits found. All limits are already enabled."
+    return 0
+  fi
+
+  if ! menu_select_index "Enable Limit" "Select GRE:" "${GRE_LABELS[@]}"; then
+    return 0
+  fi
+
+  local idx="$MENU_SELECTED"
+  local label="${GRE_LABELS[$idx]}"
+  id=$(echo "$label" | grep -oP 'GRE\K[0-9]+')
+  
+  local cfg="${LIMIT_DIR}/gre${id}.conf"
+  
+  # Enable limit
+  sed -i 's/^ENABLED=0/ENABLED=1/' "$cfg"
+  
+  add_log "Limit enabled for GRE${id}"
+  
+  render
+  echo "┌─────────────────────────────────────────────────────────────────────┐"
+  echo "│                    LIMIT RE-ENABLED                                │"
+  echo "├─────────────────────────────────────────────────────────────────────┤"
+  printf "│ %-67s │\n" "Tunnel: GRE${id}"
+  printf "│ %-67s │\n" "Status: ENABLED"
+  printf "│ %-67s │\n" "Tunnel will stop when limit is reached"
+  echo "└─────────────────────────────────────────────────────────────────────┘"
+  pause_enter
+}
+
 traffic_limit_menu() {
   local sel=""
   
@@ -1535,12 +1766,18 @@ traffic_limit_menu() {
     render
     echo "┌─────────────────────────────────────────────────────────────────────┐"
     echo "│                    TRAFFIC LIMIT MANAGEMENT                        │"
+    echo "├─────────────────────────────────────────────────────────────────────┤"
+    printf "│ %-67s │\n" "NOTE: Use this feature on IRAN server only"
+    printf "│ %-67s │\n" "      (both sides have same traffic)"
     echo "└─────────────────────────────────────────────────────────────────────┘"
     echo
     echo "1) Set Traffic Limit"
-    echo "2) View Traffic Usage"
-    echo "3) Reset Traffic Counter"
-    echo "4) Remove Traffic Limit"
+    echo "2) Edit Traffic Limit"
+    echo "3) View Traffic Usage"
+    echo "4) Reset Traffic Counter"
+    echo "5) Set Unlimited"
+    echo "6) Enable Limit"
+    echo "7) Remove Limit Config"
     echo "0) Back"
     echo
     read -r -e -p "Select: " sel
@@ -1548,9 +1785,12 @@ traffic_limit_menu() {
     
     case "$sel" in
       1) set_traffic_limit ;;
-      2) view_traffic_usage ;;
-      3) reset_traffic_counter ;;
-      4) remove_traffic_limit ;;
+      2) edit_traffic_limit ;;
+      3) view_traffic_usage ;;
+      4) reset_traffic_counter ;;
+      5) set_unlimited ;;
+      6) enable_limit ;;
+      7) remove_traffic_limit ;;
       0) return 0 ;;
       *) add_log "Invalid selection: $sel" ;;
     esac
