@@ -1138,6 +1138,104 @@ calc_mode_to_text() {
   esac
 }
 
+# ==================== PORT-SPECIFIC TRAFFIC FUNCTIONS ====================
+
+get_port_traffic() {
+  local id="$1"
+  local port="$2"
+  local chain="GRE${id}_P${port}"
+  
+  # Check if chain exists
+  if ! iptables -L "$chain" -n >/dev/null 2>&1; then
+    echo "0 0"
+    return 1
+  fi
+  
+  # Get bytes from iptables (INPUT = RX, OUTPUT = TX)
+  local rx tx
+  rx=$(iptables -L "$chain" -v -n -x 2>/dev/null | awk 'NR==3 {print $2}' || echo 0)
+  tx=$(iptables -L "${chain}_OUT" -v -n -x 2>/dev/null | awk 'NR==3 {print $2}' || echo 0)
+  [[ -z "$rx" ]] && rx=0
+  [[ -z "$tx" ]] && tx=0
+  echo "$rx $tx"
+}
+
+setup_port_counter() {
+  local id="$1"
+  local port="$2"
+  local chain="GRE${id}_P${port}"
+  local chain_out="${chain}_OUT"
+  
+  # Remove if exists
+  iptables -D INPUT -p tcp --dport "$port" -j "$chain" 2>/dev/null || true
+  iptables -D OUTPUT -p tcp --sport "$port" -j "$chain_out" 2>/dev/null || true
+  iptables -F "$chain" 2>/dev/null || true
+  iptables -X "$chain" 2>/dev/null || true
+  iptables -F "$chain_out" 2>/dev/null || true
+  iptables -X "$chain_out" 2>/dev/null || true
+  
+  # Create new chains
+  iptables -N "$chain" 2>/dev/null || true
+  iptables -A "$chain" -j RETURN
+  iptables -I INPUT -p tcp --dport "$port" -j "$chain"
+  
+  iptables -N "$chain_out" 2>/dev/null || true
+  iptables -A "$chain_out" -j RETURN
+  iptables -I OUTPUT -p tcp --sport "$port" -j "$chain_out"
+  
+  return 0
+}
+
+remove_port_counter() {
+  local id="$1"
+  local port="$2"
+  local chain="GRE${id}_P${port}"
+  local chain_out="${chain}_OUT"
+  
+  iptables -D INPUT -p tcp --dport "$port" -j "$chain" 2>/dev/null || true
+  iptables -D OUTPUT -p tcp --sport "$port" -j "$chain_out" 2>/dev/null || true
+  iptables -F "$chain" 2>/dev/null || true
+  iptables -X "$chain" 2>/dev/null || true
+  iptables -F "$chain_out" 2>/dev/null || true
+  iptables -X "$chain_out" 2>/dev/null || true
+}
+
+save_port_limit_config() {
+  local id="$1"
+  local port="$2"
+  local limit_bytes="$3"
+  local base_rx="$4"
+  local base_tx="$5"
+  local enabled="$6"
+  local calc_mode="${7:-both}"
+  
+  mkdir -p "$LIMIT_DIR" 2>/dev/null || true
+  
+  cat > "${LIMIT_DIR}/gre${id}_port${port}.conf" <<EOF
+LIMIT_TYPE=port
+GRE_ID=${id}
+PORT=${port}
+LIMIT_BYTES=${limit_bytes}
+BASE_RX=${base_rx}
+BASE_TX=${base_tx}
+ENABLED=${enabled}
+CALC_MODE=${calc_mode}
+CREATED=$(date +"%Y-%m-%d %H:%M:%S")
+EOF
+}
+
+block_port() {
+  local port="$1"
+  # Block port using iptables
+  iptables -I INPUT -p tcp --dport "$port" -j DROP 2>/dev/null || true
+}
+
+unblock_port() {
+  local port="$1"
+  # Remove block
+  iptables -D INPUT -p tcp --dport "$port" -j DROP 2>/dev/null || true
+}
+
 install_limit_checker() {
   add_log "Installing traffic limit checker service..."
   render
@@ -1149,8 +1247,24 @@ install_limit_checker() {
 #!/usr/bin/env bash
 LIMIT_DIR="/etc/gre-limits"
 
-for cfg in "${LIMIT_DIR}"/gre*.conf; do
+# Function to get port traffic from iptables
+get_port_traffic_checker() {
+  local id="$1"
+  local port="$2"
+  local chain="GRE${id}_P${port}"
+  
+  local rx tx
+  rx=$(iptables -L "$chain" -v -n -x 2>/dev/null | awk 'NR==3 {print $2}' || echo 0)
+  tx=$(iptables -L "${chain}_OUT" -v -n -x 2>/dev/null | awk 'NR==3 {print $2}' || echo 0)
+  [[ -z "$rx" ]] && rx=0
+  [[ -z "$tx" ]] && tx=0
+  echo "$rx $tx"
+}
+
+# Check tunnel limits
+for cfg in "${LIMIT_DIR}"/gre[0-9]*.conf; do
   [[ -f "$cfg" ]] || continue
+  [[ "$cfg" =~ _port ]] && continue  # Skip port configs
   
   id=$(basename "$cfg" | sed 's/gre\([0-9]*\)\.conf/\1/')
   iface="gre${id}"
@@ -1169,7 +1283,6 @@ for cfg in "${LIMIT_DIR}"/gre*.conf; do
   ((used_rx < 0)) && used_rx=0
   ((used_tx < 0)) && used_tx=0
   
-  # Calculate based on CALC_MODE
   case "${CALC_MODE:-both}" in
     rx) total_used=$used_rx ;;
     tx) total_used=$used_tx ;;
@@ -1178,12 +1291,40 @@ for cfg in "${LIMIT_DIR}"/gre*.conf; do
   
   if ((total_used >= LIMIT_BYTES)); then
     systemctl stop "gre${id}.service" 2>/dev/null || true
-    
-    # Update config to disabled
     sed -i 's/^ENABLED=1/ENABLED=0/' "$cfg"
+    echo "[$(date +"%Y-%m-%d %H:%M:%S")] GRE${id} TUNNEL stopped - Limit reached (Used: $((total_used/1073741824))GB)" >> "${LIMIT_DIR}/limit.log"
+  fi
+done
+
+# Check port-specific limits
+for cfg in "${LIMIT_DIR}"/gre*_port*.conf; do
+  [[ -f "$cfg" ]] || continue
+  
+  source "$cfg"
+  
+  [[ "$ENABLED" != "1" ]] && continue
+  [[ "$LIMIT_TYPE" != "port" ]] && continue
+  
+  read -r rx tx <<< "$(get_port_traffic_checker "$GRE_ID" "$PORT")"
+  
+  used_rx=$((rx - BASE_RX))
+  used_tx=$((tx - BASE_TX))
+  ((used_rx < 0)) && used_rx=0
+  ((used_tx < 0)) && used_tx=0
+  
+  case "${CALC_MODE:-both}" in
+    rx) total_used=$used_rx ;;
+    tx) total_used=$used_tx ;;
+    both|*) total_used=$((used_rx + used_tx)) ;;
+  esac
+  
+  if ((total_used >= LIMIT_BYTES)); then
+    # Block the port
+    iptables -C INPUT -p tcp --dport "$PORT" -j DROP 2>/dev/null || \
+      iptables -I INPUT -p tcp --dport "$PORT" -j DROP
     
-    # Log the event
-    echo "[$(date +"%Y-%m-%d %H:%M:%S")] GRE${id} stopped - Traffic limit reached (Used: $((total_used/1073741824))GB, Mode: ${CALC_MODE:-both})" >> "${LIMIT_DIR}/limit.log"
+    sed -i 's/^ENABLED=1/ENABLED=0/' "$cfg"
+    echo "[$(date +"%Y-%m-%d %H:%M:%S")] GRE${GRE_ID} PORT ${PORT} blocked - Limit reached (Used: $((total_used/1073741824))GB)" >> "${LIMIT_DIR}/limit.log"
   fi
 done
 CHECKER_EOF
