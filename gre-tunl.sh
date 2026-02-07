@@ -2167,31 +2167,64 @@ edit_traffic_limit() {
   render
   
   mapfile -t GRE_IDS < <(get_gre_ids)
-  local -a GRE_LABELS=()
-  local id has_any=0
+  
+  if ((${#GRE_IDS[@]} == 0)); then
+    die_soft "No GRE tunnels found."
+    return 0
+  fi
+  
+  # Build list of all limits (tunnel + port)
+  local -a LIMIT_LABELS=()
+  local -a LIMIT_TYPES=()
+  local -a LIMIT_IDS=()
+  local -a LIMIT_PORTS=()
+  
+  local id
   for id in "${GRE_IDS[@]}"; do
+    # Check tunnel limit
     local cfg="${LIMIT_DIR}/gre${id}.conf"
     if [[ -f "$cfg" ]]; then
       source "$cfg"
-      local limit_hr="$(bytes_to_human ${LIMIT_BYTES:-0})"
-      GRE_LABELS+=("GRE${id} (${limit_hr})")
-      has_any=1
+      LIMIT_LABELS+=("GRE${id} - Tunnel ($(bytes_to_human ${LIMIT_BYTES:-0}))")
+      LIMIT_TYPES+=("tunnel")
+      LIMIT_IDS+=("$id")
+      LIMIT_PORTS+=("")
     fi
+    
+    # Check port limits
+    for port_cfg in "${LIMIT_DIR}"/gre${id}_port*.conf; do
+      [[ -f "$port_cfg" ]] || continue
+      source "$port_cfg"
+      LIMIT_LABELS+=("GRE${id} - Port ${PORT} ($(bytes_to_human ${LIMIT_BYTES:-0}))")
+      LIMIT_TYPES+=("port")
+      LIMIT_IDS+=("$id")
+      LIMIT_PORTS+=("$PORT")
+    done
   done
-
-  if ((has_any == 0)); then
-    die_soft "No traffic limits configured. Use 'Set Traffic Limit' first."
-    return 0
-  fi
-
-  if ! menu_select_index "Edit Traffic Limit" "Select GRE:" "${GRE_LABELS[@]}"; then
-    return 0
-  fi
-
-  local idx="$MENU_SELECTED"
-  local label="${GRE_LABELS[$idx]}"
-  id=$(echo "$label" | grep -oP 'GRE\K[0-9]+')
   
+  if ((${#LIMIT_LABELS[@]} == 0)); then
+    die_soft "No traffic limits configured."
+    return 0
+  fi
+  
+  if ! menu_select_index "Edit Traffic Limit" "Select limit to edit:" "${LIMIT_LABELS[@]}"; then
+    return 0
+  fi
+  
+  local idx="$MENU_SELECTED"
+  local limit_type="${LIMIT_TYPES[$idx]}"
+  id="${LIMIT_IDS[$idx]}"
+  local port="${LIMIT_PORTS[$idx]}"
+  
+  if [[ "$limit_type" == "tunnel" ]]; then
+    edit_tunnel_limit "$id"
+  else
+    edit_port_limit "$id" "$port"
+  fi
+}
+
+edit_tunnel_limit() {
+  local id="$1"
   local cfg="${LIMIT_DIR}/gre${id}.conf"
   source "$cfg"
   
@@ -2210,7 +2243,6 @@ edit_traffic_limit() {
   ((used_rx < 0)) && used_rx=0
   ((used_tx < 0)) && used_tx=0
   
-  # Calculate based on mode
   case "$calc_mode" in
     rx) used=$used_rx ;;
     tx) used=$used_tx ;;
@@ -2221,21 +2253,19 @@ edit_traffic_limit() {
   while true; do
     render
     echo "┌─────────────────────────────────────────────────────────────────────┐"
-    echo "│                    EDIT TRAFFIC LIMIT - GRE${id}                      │"
+    echo "│                    EDIT TUNNEL LIMIT - GRE${id}                       │"
     echo "├─────────────────────────────────────────────────────────────────────┤"
     printf "│ %-67s │\n" "Current Limit: $(bytes_to_human $old_limit_bytes)"
     printf "│ %-67s │\n" "Current Mode: $(calc_mode_to_text $calc_mode)"
     printf "│ %-67s │\n" "Used So Far: $(bytes_to_human $used)"
     printf "│ %-67s │\n" "Status: $( [[ "$enabled" == "1" ]] && echo "ENABLED" || echo "DISABLED" )"
-    echo "├─────────────────────────────────────────────────────────────────────┤"
-    printf "│ %-67s │\n" "NOTE: Changing limit will NOT reset the counter"
     echo "└─────────────────────────────────────────────────────────────────────┘"
     echo
-    read -r -e -p "Enter NEW traffic limit in GB (e.g., 20 or 15.5): " new_limit_gb
+    read -r -e -p "Enter NEW limit in GB (e.g., 20 or 15.5): " new_limit_gb
     new_limit_gb="$(trim "$new_limit_gb")"
     
     if [[ -z "$new_limit_gb" ]]; then
-      add_log "Empty input. Please try again."
+      add_log "Empty input."
       continue
     fi
     
@@ -2247,43 +2277,127 @@ edit_traffic_limit() {
   done
   
   # Ask if user wants to change calculation mode
-  local change_mode=""
   render
-  echo "Do you want to change the calculation mode?"
-  echo "Current: $(calc_mode_to_text $calc_mode)"
+  echo "Change calculation mode? Current: $(calc_mode_to_text $calc_mode)"
   echo
   echo "1) Keep current mode"
-  echo "2) Change to Download Only (RX)"
-  echo "3) Change to Upload Only (TX)"
-  echo "4) Change to Download + Upload (RX+TX)"
+  echo "2) Download Only (RX)"
+  echo "3) Upload Only (TX)"
+  echo "4) Download + Upload (RX+TX)"
   echo
+  local change_mode=""
   read -r -e -p "Select (1-4): " change_mode
-  change_mode="$(trim "$change_mode")"
   
   case "$change_mode" in
     2) calc_mode="rx" ;;
     3) calc_mode="tx" ;;
     4) calc_mode="both" ;;
-    *) ;; # Keep current
   esac
   
   local new_limit_bytes
   new_limit_bytes=$(gb_to_bytes "$new_limit_gb")
   
-  # Save with same base values (keep counter)
   save_limit_config "$id" "$new_limit_bytes" "$base_rx" "$base_tx" "$enabled" "$calc_mode"
   
-  add_log "Traffic limit changed: $(bytes_to_human $old_limit_bytes) -> ${new_limit_gb} GB"
+  add_log "Tunnel limit changed: $(bytes_to_human $old_limit_bytes) -> ${new_limit_gb} GB"
   
   render
   echo "┌─────────────────────────────────────────────────────────────────────┐"
-  echo "│                    TRAFFIC LIMIT UPDATED                           │"
+  echo "│                    TUNNEL LIMIT UPDATED                            │"
   echo "├─────────────────────────────────────────────────────────────────────┤"
   printf "│ %-67s │\n" "Tunnel: GRE${id}"
-  printf "│ %-67s │\n" "Old Limit: $(bytes_to_human $old_limit_bytes)"
   printf "│ %-67s │\n" "New Limit: ${new_limit_gb} GB"
   printf "│ %-67s │\n" "Mode: $(calc_mode_to_text $calc_mode)"
-  printf "│ %-67s │\n" "Used: $(bytes_to_human $used) (unchanged)"
+  echo "└─────────────────────────────────────────────────────────────────────┘"
+  pause_enter
+}
+
+edit_port_limit() {
+  local id="$1"
+  local port="$2"
+  local cfg="${LIMIT_DIR}/gre${id}_port${port}.conf"
+  source "$cfg"
+  
+  local old_limit_bytes="${LIMIT_BYTES:-0}"
+  local base_rx="${BASE_RX:-0}"
+  local base_tx="${BASE_TX:-0}"
+  local enabled="${ENABLED:-1}"
+  local calc_mode="${CALC_MODE:-both}"
+  
+  # Get current usage
+  local traffic_info rx tx used_rx used_tx used
+  traffic_info=$(get_port_traffic "$id" "$port")
+  read -r rx tx <<< "$traffic_info"
+  used_rx=$((rx - base_rx))
+  used_tx=$((tx - base_tx))
+  ((used_rx < 0)) && used_rx=0
+  ((used_tx < 0)) && used_tx=0
+  
+  case "$calc_mode" in
+    rx) used=$used_rx ;;
+    tx) used=$used_tx ;;
+    both|*) used=$((used_rx + used_tx)) ;;
+  esac
+  
+  local new_limit_gb=""
+  while true; do
+    render
+    echo "┌─────────────────────────────────────────────────────────────────────┐"
+    echo "│              EDIT PORT LIMIT - GRE${id} PORT ${port}                    │"
+    echo "├─────────────────────────────────────────────────────────────────────┤"
+    printf "│ %-67s │\n" "Current Limit: $(bytes_to_human $old_limit_bytes)"
+    printf "│ %-67s │\n" "Current Mode: $(calc_mode_to_text $calc_mode)"
+    printf "│ %-67s │\n" "Used So Far: $(bytes_to_human $used)"
+    printf "│ %-67s │\n" "Status: $( [[ "$enabled" == "1" ]] && echo "ENABLED" || echo "BLOCKED" )"
+    echo "└─────────────────────────────────────────────────────────────────────┘"
+    echo
+    read -r -e -p "Enter NEW limit in GB (e.g., 20 or 15.5): " new_limit_gb
+    new_limit_gb="$(trim "$new_limit_gb")"
+    
+    if [[ -z "$new_limit_gb" ]]; then
+      add_log "Empty input."
+      continue
+    fi
+    
+    if [[ "$new_limit_gb" =~ ^[0-9]+\.?[0-9]*$ ]] && awk "BEGIN {exit !($new_limit_gb > 0)}"; then
+      break
+    else
+      add_log "Invalid input: $new_limit_gb"
+    fi
+  done
+  
+  # Ask if user wants to change calculation mode
+  render
+  echo "Change calculation mode? Current: $(calc_mode_to_text $calc_mode)"
+  echo
+  echo "1) Keep current mode"
+  echo "2) Download Only (RX)"
+  echo "3) Upload Only (TX)"
+  echo "4) Download + Upload (RX+TX)"
+  echo
+  local change_mode=""
+  read -r -e -p "Select (1-4): " change_mode
+  
+  case "$change_mode" in
+    2) calc_mode="rx" ;;
+    3) calc_mode="tx" ;;
+    4) calc_mode="both" ;;
+  esac
+  
+  local new_limit_bytes
+  new_limit_bytes=$(gb_to_bytes "$new_limit_gb")
+  
+  save_port_limit_config "$id" "$port" "$new_limit_bytes" "$base_rx" "$base_tx" "$enabled" "$calc_mode"
+  
+  add_log "Port limit changed: $(bytes_to_human $old_limit_bytes) -> ${new_limit_gb} GB"
+  
+  render
+  echo "┌─────────────────────────────────────────────────────────────────────┐"
+  echo "│                    PORT LIMIT UPDATED                              │"
+  echo "├─────────────────────────────────────────────────────────────────────┤"
+  printf "│ %-67s │\n" "Tunnel: GRE${id} - Port ${port}"
+  printf "│ %-67s │\n" "New Limit: ${new_limit_gb} GB"
+  printf "│ %-67s │\n" "Mode: $(calc_mode_to_text $calc_mode)"
   echo "└─────────────────────────────────────────────────────────────────────┘"
   pause_enter
 }
@@ -2294,31 +2408,171 @@ set_unlimited() {
   render
   
   mapfile -t GRE_IDS < <(get_gre_ids)
-  local -a GRE_LABELS=()
-  local id has_any=0
+  
+  if ((${#GRE_IDS[@]} == 0)); then
+    die_soft "No GRE tunnels found."
+    return 0
+  fi
+  
+  # Build list of enabled limits
+  local -a LIMIT_LABELS=()
+  local -a LIMIT_TYPES=()
+  local -a LIMIT_IDS=()
+  local -a LIMIT_PORTS=()
+  
+  local id
   for id in "${GRE_IDS[@]}"; do
     local cfg="${LIMIT_DIR}/gre${id}.conf"
     if [[ -f "$cfg" ]]; then
       source "$cfg"
-      local status="ON"
-      [[ "$ENABLED" != "1" ]] && status="OFF"
-      GRE_LABELS+=("GRE${id} - Limit: ${status}")
-      has_any=1
+      if [[ "$ENABLED" == "1" ]]; then
+        LIMIT_LABELS+=("GRE${id} - Tunnel")
+        LIMIT_TYPES+=("tunnel")
+        LIMIT_IDS+=("$id")
+        LIMIT_PORTS+=("")
+      fi
     fi
+    
+    for port_cfg in "${LIMIT_DIR}"/gre${id}_port*.conf; do
+      [[ -f "$port_cfg" ]] || continue
+      source "$port_cfg"
+      if [[ "$ENABLED" == "1" ]]; then
+        LIMIT_LABELS+=("GRE${id} - Port ${PORT}")
+        LIMIT_TYPES+=("port")
+        LIMIT_IDS+=("$id")
+        LIMIT_PORTS+=("$PORT")
+      fi
+    done
   done
-
-  if ((has_any == 0)); then
-    die_soft "No traffic limits configured. Nothing to set unlimited."
+  
+  if ((${#LIMIT_LABELS[@]} == 0)); then
+    die_soft "No enabled limits found."
     return 0
   fi
-
-  if ! menu_select_index "Set Unlimited (Disable Limit)" "Select GRE:" "${GRE_LABELS[@]}"; then
+  
+  if ! menu_select_index "Set Unlimited" "Select limit to disable:" "${LIMIT_LABELS[@]}"; then
     return 0
   fi
-
+  
   local idx="$MENU_SELECTED"
-  local label="${GRE_LABELS[$idx]}"
-  id=$(echo "$label" | grep -oP 'GRE\K[0-9]+')
+  local limit_type="${LIMIT_TYPES[$idx]}"
+  id="${LIMIT_IDS[$idx]}"
+  local port="${LIMIT_PORTS[$idx]}"
+  
+  local cfg
+  if [[ "$limit_type" == "tunnel" ]]; then
+    cfg="${LIMIT_DIR}/gre${id}.conf"
+  else
+    cfg="${LIMIT_DIR}/gre${id}_port${port}.conf"
+  fi
+  
+  # Disable limit
+  sed -i 's/^ENABLED=1/ENABLED=0/' "$cfg"
+  
+  # Unblock port if it's a port limit
+  if [[ "$limit_type" == "port" ]]; then
+    unblock_port "$port"
+  fi
+  
+  add_log "Limit disabled (unlimited mode)"
+  
+  render
+  echo "┌─────────────────────────────────────────────────────────────────────┐"
+  echo "│                    UNLIMITED MODE ENABLED                          │"
+  echo "├─────────────────────────────────────────────────────────────────────┤"
+  if [[ "$limit_type" == "tunnel" ]]; then
+    printf "│ %-67s │\n" "Tunnel: GRE${id}"
+  else
+    printf "│ %-67s │\n" "Tunnel: GRE${id} - Port ${port}"
+    printf "│ %-67s │\n" "Port: UNBLOCKED"
+  fi
+  printf "│ %-67s │\n" "Status: UNLIMITED (limit disabled)"
+  echo "└─────────────────────────────────────────────────────────────────────┘"
+  pause_enter
+}
+
+enable_limit() {
+  render
+  add_log "Selected: Enable Limit"
+  render
+  
+  mapfile -t GRE_IDS < <(get_gre_ids)
+  
+  if ((${#GRE_IDS[@]} == 0)); then
+    die_soft "No GRE tunnels found."
+    return 0
+  fi
+  
+  # Build list of disabled limits
+  local -a LIMIT_LABELS=()
+  local -a LIMIT_TYPES=()
+  local -a LIMIT_IDS=()
+  local -a LIMIT_PORTS=()
+  
+  local id
+  for id in "${GRE_IDS[@]}"; do
+    local cfg="${LIMIT_DIR}/gre${id}.conf"
+    if [[ -f "$cfg" ]]; then
+      source "$cfg"
+      if [[ "$ENABLED" != "1" ]]; then
+        LIMIT_LABELS+=("GRE${id} - Tunnel ($(bytes_to_human ${LIMIT_BYTES:-0}))")
+        LIMIT_TYPES+=("tunnel")
+        LIMIT_IDS+=("$id")
+        LIMIT_PORTS+=("")
+      fi
+    fi
+    
+    for port_cfg in "${LIMIT_DIR}"/gre${id}_port*.conf; do
+      [[ -f "$port_cfg" ]] || continue
+      source "$port_cfg"
+      if [[ "$ENABLED" != "1" ]]; then
+        LIMIT_LABELS+=("GRE${id} - Port ${PORT} ($(bytes_to_human ${LIMIT_BYTES:-0}))")
+        LIMIT_TYPES+=("port")
+        LIMIT_IDS+=("$id")
+        LIMIT_PORTS+=("$PORT")
+      fi
+    done
+  done
+  
+  if ((${#LIMIT_LABELS[@]} == 0)); then
+    die_soft "No disabled limits found."
+    return 0
+  fi
+  
+  if ! menu_select_index "Enable Limit" "Select limit to enable:" "${LIMIT_LABELS[@]}"; then
+    return 0
+  fi
+  
+  local idx="$MENU_SELECTED"
+  local limit_type="${LIMIT_TYPES[$idx]}"
+  id="${LIMIT_IDS[$idx]}"
+  local port="${LIMIT_PORTS[$idx]}"
+  
+  local cfg
+  if [[ "$limit_type" == "tunnel" ]]; then
+    cfg="${LIMIT_DIR}/gre${id}.conf"
+  else
+    cfg="${LIMIT_DIR}/gre${id}_port${port}.conf"
+  fi
+  
+  # Enable limit
+  sed -i 's/^ENABLED=0/ENABLED=1/' "$cfg"
+  
+  add_log "Limit enabled"
+  
+  render
+  echo "┌─────────────────────────────────────────────────────────────────────┐"
+  echo "│                    LIMIT RE-ENABLED                                │"
+  echo "├─────────────────────────────────────────────────────────────────────┤"
+  if [[ "$limit_type" == "tunnel" ]]; then
+    printf "│ %-67s │\n" "Tunnel: GRE${id}"
+  else
+    printf "│ %-67s │\n" "Tunnel: GRE${id} - Port ${port}"
+  fi
+  printf "│ %-67s │\n" "Status: ENABLED"
+  echo "└─────────────────────────────────────────────────────────────────────┘"
+  pause_enter
+}
   
   local cfg="${LIMIT_DIR}/gre${id}.conf"
   source "$cfg"
