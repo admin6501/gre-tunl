@@ -1114,6 +1114,7 @@ save_limit_config() {
   local base_rx="$3"
   local base_tx="$4"
   local enabled="$5"
+  local calc_mode="${6:-both}"  # rx, tx, both
   
   mkdir -p "$LIMIT_DIR" 2>/dev/null || true
   
@@ -1122,8 +1123,19 @@ LIMIT_BYTES=${limit_bytes}
 BASE_RX=${base_rx}
 BASE_TX=${base_tx}
 ENABLED=${enabled}
+CALC_MODE=${calc_mode}
 CREATED=$(date +"%Y-%m-%d %H:%M:%S")
 EOF
+}
+
+calc_mode_to_text() {
+  local mode="$1"
+  case "$mode" in
+    rx) echo "Download Only (RX)" ;;
+    tx) echo "Upload Only (TX)" ;;
+    both) echo "Download + Upload (RX+TX)" ;;
+    *) echo "Download + Upload (RX+TX)" ;;
+  esac
 }
 
 install_limit_checker() {
@@ -1157,7 +1169,12 @@ for cfg in "${LIMIT_DIR}"/gre*.conf; do
   ((used_rx < 0)) && used_rx=0
   ((used_tx < 0)) && used_tx=0
   
-  total_used=$((used_rx + used_tx))
+  # Calculate based on CALC_MODE
+  case "${CALC_MODE:-both}" in
+    rx) total_used=$used_rx ;;
+    tx) total_used=$used_tx ;;
+    both|*) total_used=$((used_rx + used_tx)) ;;
+  esac
   
   if ((total_used >= LIMIT_BYTES)); then
     systemctl stop "gre${id}.service" 2>/dev/null || true
@@ -1166,7 +1183,7 @@ for cfg in "${LIMIT_DIR}"/gre*.conf; do
     sed -i 's/^ENABLED=1/ENABLED=0/' "$cfg"
     
     # Log the event
-    echo "[$(date +"%Y-%m-%d %H:%M:%S")] GRE${id} stopped - Traffic limit reached (Used: $((total_used/1073741824))GB)" >> "${LIMIT_DIR}/limit.log"
+    echo "[$(date +"%Y-%m-%d %H:%M:%S")] GRE${id} stopped - Traffic limit reached (Used: $((total_used/1073741824))GB, Mode: ${CALC_MODE:-both})" >> "${LIMIT_DIR}/limit.log"
   fi
 done
 CHECKER_EOF
