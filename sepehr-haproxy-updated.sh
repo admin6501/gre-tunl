@@ -1471,6 +1471,7 @@ reset_traffic_counter() {
   # Read current limit
   source "$cfg"
   local limit_bytes="${LIMIT_BYTES:-0}"
+  local calc_mode="${CALC_MODE:-both}"
   
   # Confirmation
   while true; do
