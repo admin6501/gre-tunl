@@ -1059,6 +1059,506 @@ remove_tunnel_port() {
   pause_enter
 }
 
+# ==================== TRAFFIC LIMIT SYSTEM ====================
+
+LIMIT_DIR="/etc/gre-limits"
+LIMIT_CHECK_SCRIPT="/usr/local/bin/gre-limit-checker.sh"
+LIMIT_SERVICE="/etc/systemd/system/gre-limit-checker.service"
+LIMIT_TIMER="/etc/systemd/system/gre-limit-checker.timer"
+
+bytes_to_human() {
+  local bytes="$1"
+  if ((bytes >= 1073741824)); then
+    echo "$(awk "BEGIN {printf \"%.2f\", $bytes/1073741824}") GB"
+  elif ((bytes >= 1048576)); then
+    echo "$(awk "BEGIN {printf \"%.2f\", $bytes/1048576}") MB"
+  elif ((bytes >= 1024)); then
+    echo "$(awk "BEGIN {printf \"%.2f\", $bytes/1024}") KB"
+  else
+    echo "${bytes} B"
+  fi
+}
+
+gb_to_bytes() {
+  local gb="$1"
+  awk "BEGIN {printf \"%.0f\", $gb * 1073741824}"
+}
+
+get_tunnel_traffic() {
+  local id="$1"
+  local iface="gre${id}"
+  
+  if [[ ! -d "/sys/class/net/${iface}" ]]; then
+    echo "0 0"
+    return 1
+  fi
+  
+  local rx tx
+  rx=$(cat "/sys/class/net/${iface}/statistics/rx_bytes" 2>/dev/null || echo 0)
+  tx=$(cat "/sys/class/net/${iface}/statistics/tx_bytes" 2>/dev/null || echo 0)
+  echo "$rx $tx"
+}
+
+get_limit_config() {
+  local id="$1"
+  local cfg="${LIMIT_DIR}/gre${id}.conf"
+  
+  if [[ -f "$cfg" ]]; then
+    cat "$cfg"
+  fi
+}
+
+save_limit_config() {
+  local id="$1"
+  local limit_bytes="$2"
+  local base_rx="$3"
+  local base_tx="$4"
+  local enabled="$5"
+  
+  mkdir -p "$LIMIT_DIR" 2>/dev/null || true
+  
+  cat > "${LIMIT_DIR}/gre${id}.conf" <<EOF
+LIMIT_BYTES=${limit_bytes}
+BASE_RX=${base_rx}
+BASE_TX=${base_tx}
+ENABLED=${enabled}
+CREATED=$(date +"%Y-%m-%d %H:%M:%S")
+EOF
+}
+
+install_limit_checker() {
+  add_log "Installing traffic limit checker service..."
+  render
+  
+  mkdir -p "$LIMIT_DIR" 2>/dev/null || true
+  
+  # Create checker script
+  cat > "$LIMIT_CHECK_SCRIPT" <<'CHECKER_EOF'
+#!/usr/bin/env bash
+LIMIT_DIR="/etc/gre-limits"
+
+for cfg in "${LIMIT_DIR}"/gre*.conf; do
+  [[ -f "$cfg" ]] || continue
+  
+  id=$(basename "$cfg" | sed 's/gre\([0-9]*\)\.conf/\1/')
+  iface="gre${id}"
+  
+  [[ -d "/sys/class/net/${iface}" ]] || continue
+  
+  source "$cfg"
+  
+  [[ "$ENABLED" != "1" ]] && continue
+  
+  rx=$(cat "/sys/class/net/${iface}/statistics/rx_bytes" 2>/dev/null || echo 0)
+  tx=$(cat "/sys/class/net/${iface}/statistics/tx_bytes" 2>/dev/null || echo 0)
+  
+  used_rx=$((rx - BASE_RX))
+  used_tx=$((tx - BASE_TX))
+  ((used_rx < 0)) && used_rx=0
+  ((used_tx < 0)) && used_tx=0
+  
+  total_used=$((used_rx + used_tx))
+  
+  if ((total_used >= LIMIT_BYTES)); then
+    systemctl stop "gre${id}.service" 2>/dev/null || true
+    
+    # Update config to disabled
+    sed -i 's/^ENABLED=1/ENABLED=0/' "$cfg"
+    
+    # Log the event
+    echo "[$(date +"%Y-%m-%d %H:%M:%S")] GRE${id} stopped - Traffic limit reached (Used: $((total_used/1073741824))GB)" >> "${LIMIT_DIR}/limit.log"
+  fi
+done
+CHECKER_EOF
+
+  chmod +x "$LIMIT_CHECK_SCRIPT"
+  
+  # Create systemd service
+  cat > "$LIMIT_SERVICE" <<EOF
+[Unit]
+Description=GRE Tunnel Traffic Limit Checker
+After=network.target
+
+[Service]
+Type=oneshot
+ExecStart=${LIMIT_CHECK_SCRIPT}
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+  # Create systemd timer (runs every minute)
+  cat > "$LIMIT_TIMER" <<EOF
+[Unit]
+Description=GRE Tunnel Traffic Limit Checker Timer
+
+[Timer]
+OnBootSec=1min
+OnUnitActiveSec=1min
+AccuracySec=30s
+
+[Install]
+WantedBy=timers.target
+EOF
+
+  systemctl daemon-reload >/dev/null 2>&1
+  systemctl enable --now gre-limit-checker.timer >/dev/null 2>&1
+  
+  add_log "Traffic limit checker installed and started."
+}
+
+is_limit_checker_installed() {
+  [[ -f "$LIMIT_CHECK_SCRIPT" ]] && [[ -f "$LIMIT_TIMER" ]]
+}
+
+set_traffic_limit() {
+  render
+  add_log "Selected: Set Traffic Limit"
+  render
+  
+  # Ensure checker is installed
+  if ! is_limit_checker_installed; then
+    install_limit_checker
+  fi
+  
+  mapfile -t GRE_IDS < <(get_gre_ids)
+  local -a GRE_LABELS=()
+  local id
+  for id in "${GRE_IDS[@]}"; do
+    GRE_LABELS+=("GRE${id}")
+  done
+
+  if ! menu_select_index "Set Traffic Limit" "Select GRE:" "${GRE_LABELS[@]}"; then
+    return 0
+  fi
+
+  local idx="$MENU_SELECTED"
+  id="${GRE_IDS[$idx]}"
+  add_log "GRE selected: GRE${id}"
+  render
+  
+  # Check if tunnel is up
+  if [[ ! -d "/sys/class/net/gre${id}" ]]; then
+    die_soft "GRE${id} interface not found. Is the tunnel running?"
+    return 0
+  fi
+  
+  # Get current traffic
+  local traffic_info
+  traffic_info=$(get_tunnel_traffic "$id")
+  local current_rx current_tx
+  read -r current_rx current_tx <<< "$traffic_info"
+  
+  # Ask for limit
+  local limit_gb=""
+  while true; do
+    render
+    echo "┌─────────────────────────────────────────────────────────────────────┐"
+    echo "│                    SET TRAFFIC LIMIT - GRE${id}                       │"
+    echo "├─────────────────────────────────────────────────────────────────────┤"
+    printf "│ %-67s │\n" "Current RX: $(bytes_to_human $current_rx)"
+    printf "│ %-67s │\n" "Current TX: $(bytes_to_human $current_tx)"
+    echo "└─────────────────────────────────────────────────────────────────────┘"
+    echo
+    read -r -e -p "Enter traffic limit in GB (e.g., 10 or 5.5): " limit_gb
+    limit_gb="$(trim "$limit_gb")"
+    
+    if [[ -z "$limit_gb" ]]; then
+      add_log "Empty input. Please try again."
+      continue
+    fi
+    
+    if [[ "$limit_gb" =~ ^[0-9]+\.?[0-9]*$ ]] && awk "BEGIN {exit !($limit_gb > 0)}"; then
+      break
+    else
+      add_log "Invalid input: $limit_gb"
+    fi
+  done
+  
+  local limit_bytes
+  limit_bytes=$(gb_to_bytes "$limit_gb")
+  
+  # Save config (reset counter from current values)
+  save_limit_config "$id" "$limit_bytes" "$current_rx" "$current_tx" "1"
+  
+  add_log "Traffic limit set: ${limit_gb} GB for GRE${id}"
+  
+  render
+  echo "┌─────────────────────────────────────────────────────────────────────┐"
+  echo "│                    TRAFFIC LIMIT CONFIGURED                        │"
+  echo "├─────────────────────────────────────────────────────────────────────┤"
+  printf "│ %-67s │\n" "Tunnel: GRE${id}"
+  printf "│ %-67s │\n" "Limit: ${limit_gb} GB"
+  printf "│ %-67s │\n" "Status: ENABLED"
+  printf "│ %-67s │\n" "Counter reset from current traffic values"
+  echo "└─────────────────────────────────────────────────────────────────────┘"
+  echo
+  echo "The tunnel will automatically STOP when limit is reached."
+  pause_enter
+}
+
+view_traffic_usage() {
+  render
+  add_log "Selected: View Traffic Usage"
+  render
+  
+  mapfile -t GRE_IDS < <(get_gre_ids)
+  
+  if ((${#GRE_IDS[@]} == 0)); then
+    die_soft "No GRE tunnels found."
+    return 0
+  fi
+  
+  render
+  echo "┌─────────────────────────────────────────────────────────────────────┐"
+  echo "│                       TRAFFIC USAGE REPORT                         │"
+  echo "├─────────────────────────────────────────────────────────────────────┤"
+  
+  local id
+  for id in "${GRE_IDS[@]}"; do
+    local iface="gre${id}"
+    local status="DOWN"
+    local rx=0 tx=0 used=0 limit_bytes=0 limit_str="No Limit" percent="-"
+    local base_rx=0 base_tx=0 enabled="N/A"
+    
+    if [[ -d "/sys/class/net/${iface}" ]]; then
+      status="UP"
+      local traffic_info
+      traffic_info=$(get_tunnel_traffic "$id")
+      read -r rx tx <<< "$traffic_info"
+    fi
+    
+    # Check if limit is set
+    local cfg="${LIMIT_DIR}/gre${id}.conf"
+    if [[ -f "$cfg" ]]; then
+      source "$cfg"
+      limit_bytes="${LIMIT_BYTES:-0}"
+      base_rx="${BASE_RX:-0}"
+      base_tx="${BASE_TX:-0}"
+      enabled="${ENABLED:-0}"
+      
+      local used_rx=$((rx - base_rx))
+      local used_tx=$((tx - base_tx))
+      ((used_rx < 0)) && used_rx=0
+      ((used_tx < 0)) && used_tx=0
+      used=$((used_rx + used_tx))
+      
+      if ((limit_bytes > 0)); then
+        limit_str="$(bytes_to_human $limit_bytes)"
+        percent=$(awk "BEGIN {printf \"%.1f\", ($used/$limit_bytes)*100}")
+        [[ "$enabled" == "1" ]] && enabled="ON" || enabled="OFF"
+      fi
+    fi
+    
+    local total=$((rx + tx))
+    
+    printf "│ %-67s │\n" "─────────────────────────────────────────────────────────────────"
+    printf "│ %-67s │\n" "GRE${id} [${status}]  Limit: ${enabled}"
+    printf "│ %-67s │\n" "  Total RX: $(bytes_to_human $rx)"
+    printf "│ %-67s │\n" "  Total TX: $(bytes_to_human $tx)"
+    if [[ -f "$cfg" ]] && ((limit_bytes > 0)); then
+      printf "│ %-67s │\n" "  Used (since reset): $(bytes_to_human $used) / ${limit_str} (${percent}%)"
+      
+      # Progress bar
+      local bar_len=40
+      local filled=$(awk "BEGIN {printf \"%.0f\", ($percent/100)*$bar_len}")
+      ((filled > bar_len)) && filled=$bar_len
+      local empty=$((bar_len - filled))
+      local bar=""
+      for ((i=0; i<filled; i++)); do bar+="█"; done
+      for ((i=0; i<empty; i++)); do bar+="░"; done
+      printf "│ %-67s │\n" "  [${bar}]"
+    fi
+  done
+  
+  echo "└─────────────────────────────────────────────────────────────────────┘"
+  pause_enter
+}
+
+reset_traffic_counter() {
+  render
+  add_log "Selected: Reset Traffic Counter"
+  render
+  
+  mapfile -t GRE_IDS < <(get_gre_ids)
+  local -a GRE_LABELS=()
+  local id
+  for id in "${GRE_IDS[@]}"; do
+    local cfg="${LIMIT_DIR}/gre${id}.conf"
+    if [[ -f "$cfg" ]]; then
+      GRE_LABELS+=("GRE${id} (has limit)")
+    else
+      GRE_LABELS+=("GRE${id} (no limit)")
+    fi
+  done
+
+  if ! menu_select_index "Reset Traffic Counter" "Select GRE:" "${GRE_LABELS[@]}"; then
+    return 0
+  fi
+
+  local idx="$MENU_SELECTED"
+  id="${GRE_IDS[$idx]}"
+  
+  local cfg="${LIMIT_DIR}/gre${id}.conf"
+  if [[ ! -f "$cfg" ]]; then
+    die_soft "No traffic limit configured for GRE${id}. Set a limit first."
+    return 0
+  fi
+  
+  # Get current traffic values
+  local traffic_info rx tx
+  traffic_info=$(get_tunnel_traffic "$id")
+  read -r rx tx <<< "$traffic_info"
+  
+  # Read current limit
+  source "$cfg"
+  local limit_bytes="${LIMIT_BYTES:-0}"
+  
+  # Confirmation
+  while true; do
+    render
+    echo "┌─────────────────────────────────────────────────────────────────────┐"
+    echo "│                    RESET TRAFFIC COUNTER                           │"
+    echo "├─────────────────────────────────────────────────────────────────────┤"
+    printf "│ %-67s │\n" "Tunnel: GRE${id}"
+    printf "│ %-67s │\n" "This will reset the usage counter to ZERO"
+    printf "│ %-67s │\n" "and RE-ENABLE the limit if it was disabled."
+    echo "└─────────────────────────────────────────────────────────────────────┘"
+    echo
+    echo "Type: YES (confirm)  or  NO (cancel)"
+    local confirm=""
+    read -r -e -p "Confirm: " confirm
+    confirm="$(trim "$confirm")"
+    
+    if [[ "$confirm" == "NO" || "$confirm" == "no" ]]; then
+      add_log "Reset cancelled for GRE${id}"
+      return 0
+    fi
+    if [[ "$confirm" == "YES" ]]; then
+      break
+    fi
+    add_log "Please type YES or NO."
+  done
+  
+  # Save new config with current values as base (reset counter)
+  save_limit_config "$id" "$limit_bytes" "$rx" "$tx" "1"
+  
+  # Restart tunnel if it was stopped
+  if [[ ! -d "/sys/class/net/gre${id}" ]]; then
+    add_log "Starting GRE${id} tunnel..."
+    systemctl start "gre${id}.service" >/dev/null 2>&1 || true
+  fi
+  
+  add_log "Traffic counter reset for GRE${id}"
+  
+  render
+  echo "┌─────────────────────────────────────────────────────────────────────┐"
+  echo "│                    COUNTER RESET COMPLETED                         │"
+  echo "├─────────────────────────────────────────────────────────────────────┤"
+  printf "│ %-67s │\n" "Tunnel: GRE${id}"
+  printf "│ %-67s │\n" "Limit: $(bytes_to_human $limit_bytes)"
+  printf "│ %-67s │\n" "Used: 0 B (reset)"
+  printf "│ %-67s │\n" "Status: ENABLED"
+  echo "└─────────────────────────────────────────────────────────────────────┘"
+  pause_enter
+}
+
+remove_traffic_limit() {
+  render
+  add_log "Selected: Remove Traffic Limit"
+  render
+  
+  mapfile -t GRE_IDS < <(get_gre_ids)
+  local -a GRE_LABELS=()
+  local id has_any=0
+  for id in "${GRE_IDS[@]}"; do
+    local cfg="${LIMIT_DIR}/gre${id}.conf"
+    if [[ -f "$cfg" ]]; then
+      GRE_LABELS+=("GRE${id}")
+      has_any=1
+    fi
+  done
+
+  if ((has_any == 0)); then
+    die_soft "No traffic limits configured for any tunnel."
+    return 0
+  fi
+
+  if ! menu_select_index "Remove Traffic Limit" "Select GRE:" "${GRE_LABELS[@]}"; then
+    return 0
+  fi
+
+  local idx="$MENU_SELECTED"
+  # Find actual ID from label
+  local label="${GRE_LABELS[$idx]}"
+  id="${label#GRE}"
+  
+  local cfg="${LIMIT_DIR}/gre${id}.conf"
+  
+  # Confirmation
+  while true; do
+    render
+    echo "┌─────────────────────────────────────────────────────────────────────┐"
+    echo "│                    REMOVE TRAFFIC LIMIT                            │"
+    echo "├─────────────────────────────────────────────────────────────────────┤"
+    printf "│ %-67s │\n" "Tunnel: GRE${id}"
+    printf "│ %-67s │\n" "This will REMOVE the traffic limit completely."
+    echo "└─────────────────────────────────────────────────────────────────────┘"
+    echo
+    echo "Type: YES (confirm)  or  NO (cancel)"
+    local confirm=""
+    read -r -e -p "Confirm: " confirm
+    confirm="$(trim "$confirm")"
+    
+    if [[ "$confirm" == "NO" || "$confirm" == "no" ]]; then
+      add_log "Remove limit cancelled for GRE${id}"
+      return 0
+    fi
+    if [[ "$confirm" == "YES" ]]; then
+      break
+    fi
+    add_log "Please type YES or NO."
+  done
+  
+  rm -f "$cfg" 2>/dev/null || true
+  add_log "Traffic limit removed for GRE${id}"
+  
+  render
+  echo "Traffic limit removed for GRE${id}"
+  pause_enter
+}
+
+traffic_limit_menu() {
+  local sel=""
+  
+  while true; do
+    render
+    echo "┌─────────────────────────────────────────────────────────────────────┐"
+    echo "│                    TRAFFIC LIMIT MANAGEMENT                        │"
+    echo "└─────────────────────────────────────────────────────────────────────┘"
+    echo
+    echo "1) Set Traffic Limit"
+    echo "2) View Traffic Usage"
+    echo "3) Reset Traffic Counter"
+    echo "4) Remove Traffic Limit"
+    echo "0) Back"
+    echo
+    read -r -e -p "Select: " sel
+    sel="$(trim "$sel")"
+    
+    case "$sel" in
+      1) set_traffic_limit ;;
+      2) view_traffic_usage ;;
+      3) reset_traffic_counter ;;
+      4) remove_traffic_limit ;;
+      0) return 0 ;;
+      *) add_log "Invalid selection: $sel" ;;
+    esac
+  done
+}
+
+# ==================== MAIN MENU ====================
+
 main_menu() {
   local choice=""
   while true; do
@@ -1069,6 +1569,7 @@ main_menu() {
     echo "4 > Uninstall & Clean"
     echo "5 > Add Tunnel Port"
     echo "6 > Remove Tunnel Port"
+    echo "7 > Traffic Limit"
     echo "0 > Exit"
     echo
     read -r -e -p "Select option: " choice
@@ -1081,6 +1582,7 @@ main_menu() {
       4) add_log "Selected: Uninstall & Clean"; uninstall_clean ;;
       5) add_log "Selected: Add Tunnel Port"; add_tunnel_port ;;
       6) add_log "Selected: Remove Tunnel Port"; remove_tunnel_port ;;
+      7) add_log "Selected: Traffic Limit"; traffic_limit_menu ;;
       0) add_log "Bye!"; render; exit 0 ;;
       *) add_log "Invalid option: $choice" ;;
     esac
