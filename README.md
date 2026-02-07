@@ -67,24 +67,34 @@
 
 ## 🚀 نصب و راه‌اندازی
 
-### دانلود و اجرا
+### روش ۱: دانلود مستقیم
 
 ```bash
 # دانلود اسکریپت
-wget https://raw.githubusercontent.com/YOUR_REPO/gre-tunl/main/gre-tunl.sh
+curl -fsSL -o gre-tunl.sh https://raw.githubusercontent.com/YOUR_USERNAME/gre-tunl/main/gre-tunl.sh
 
 # دادن دسترسی اجرا
 chmod +x gre-tunl.sh
 
 # اجرای اسکریپت
-sudo ./gre-tunl.sh
+sudo bash gre-tunl.sh
 ```
 
-### یا با یک دستور
+### روش ۲: اجرای مستقیم (بدون ذخیره)
 
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/YOUR_REPO/gre-tunl/main/gre-tunl.sh)
+sudo bash <(curl -fsSL https://raw.githubusercontent.com/YOUR_USERNAME/gre-tunl/main/gre-tunl.sh)
 ```
+
+### روش ۳: کلون ریپازیتوری
+
+```bash
+git clone https://github.com/YOUR_USERNAME/gre-tunl.git
+cd gre-tunl
+sudo bash gre-tunl.sh
+```
+
+> 📝 **توجه:** بعد از آپلود به GitHub، مقدار `YOUR_USERNAME` را با نام کاربری GitHub خود جایگزین کنید.
 
 ---
 
