@@ -832,6 +832,233 @@ add_tunnel_port() {
 }
 
 
+get_gre_ports() {
+  local id="$1"
+  local cfg="/etc/haproxy/conf.d/haproxy-gre${id}.cfg"
+  
+  if [[ ! -f "$cfg" ]]; then
+    return 1
+  fi
+  
+  grep -oP "^frontend gre${id}_fe_\K[0-9]+" "$cfg" 2>/dev/null | sort -n | uniq
+}
+
+haproxy_remove_ports_from_gre_cfg() {
+  local id="$1"
+  shift
+  local -a ports=("$@")
+  local cfg="/etc/haproxy/conf.d/haproxy-gre${id}.cfg"
+
+  if [[ ! -f "$cfg" ]]; then
+    add_log "ERROR: Not found: $cfg"
+    return 1
+  fi
+
+  add_log "Removing ports from HAProxy config: $cfg"
+  render
+
+  local p removed=0 notfound=0
+  local tmpfile
+  tmpfile="$(mktemp)"
+
+  for p in "${ports[@]}"; do
+    if ! grep -qE "^frontend[[:space:]]+gre${id}_fe_${p}\b" "$cfg" 2>/dev/null; then
+      add_log "Skip (not found): GRE${id} port ${p}"
+      ((notfound++))
+      continue
+    fi
+
+    # Remove frontend block
+    awk -v fe="frontend gre${id}_fe_${p}" '
+      BEGIN { skip=0 }
+      $0 ~ "^"fe"$" { skip=1; next }
+      /^frontend / || /^backend / { if(skip) skip=0 }
+      !skip { print }
+    ' "$cfg" > "$tmpfile"
+    cp "$tmpfile" "$cfg"
+
+    # Remove backend block
+    awk -v be="backend gre${id}_be_${p}" '
+      BEGIN { skip=0 }
+      $0 ~ "^"be"$" { skip=1; next }
+      /^frontend / || /^backend / { if(skip) skip=0 }
+      !skip { print }
+    ' "$cfg" > "$tmpfile"
+    cp "$tmpfile" "$cfg"
+
+    add_log "Removed: GRE${id} port ${p}"
+    ((removed++))
+  done
+
+  rm -f "$tmpfile" 2>/dev/null || true
+
+  # Clean up empty lines at end of file
+  sed -i '/^$/N;/^\n$/d' "$cfg" 2>/dev/null || true
+
+  add_log "Done. Removed=${removed}, NotFound=${notfound}"
+  return 0
+}
+
+remove_tunnel_port() {
+  render
+  add_log "Selected: remove tunnel port"
+  render
+
+  mapfile -t GRE_IDS < <(get_gre_ids)
+  local -a GRE_LABELS=()
+  local id
+  for id in "${GRE_IDS[@]}"; do
+    GRE_LABELS+=("GRE${id}")
+  done
+
+  if ! menu_select_index "Remove Tunnel Port" "Select GRE:" "${GRE_LABELS[@]}"; then
+    return 0
+  fi
+
+  local idx="$MENU_SELECTED"
+  id="${GRE_IDS[$idx]}"
+  add_log "GRE selected: GRE${id}"
+  render
+
+  # Get existing ports
+  local -a existing_ports
+  mapfile -t existing_ports < <(get_gre_ports "$id")
+
+  if ((${#existing_ports[@]} == 0)); then
+    die_soft "No ports found for GRE${id}. Config file may not exist or is empty."
+    return 0
+  fi
+
+  render
+  echo "┌─────────────────────────────────────────────────────────────────────┐"
+  echo "│                    Existing Ports for GRE${id}                        │"
+  echo "├─────────────────────────────────────────────────────────────────────┤"
+  printf "│ %-67s │\n" "Ports: ${existing_ports[*]}"
+  echo "└─────────────────────────────────────────────────────────────────────┘"
+  echo
+
+  # Ask for ports to remove
+  local raw=""
+  local -a REMOVE_PORT_LIST=()
+  
+  while true; do
+    echo "Enter ports to REMOVE (80 | 80,2053 | 2050-2060):"
+    read -r -e -p "> " raw
+    raw="$(trim "$raw")"
+    raw="${raw// /}"
+
+    if [[ -z "$raw" ]]; then
+      add_log "Empty ports. Please try again."
+      continue
+    fi
+
+    local -a ports=()
+    local ok=1
+
+    if [[ "$raw" =~ ^[0-9]+$ ]]; then
+      valid_port "$raw" && ports+=("$raw") || ok=0
+
+    elif [[ "$raw" =~ ^[0-9]+-[0-9]+$ ]]; then
+      local s="${raw%-*}"
+      local e="${raw#*-}"
+      if valid_port "$s" && valid_port "$e" && ((s<=e)); then
+        local p
+        for ((p=s; p<=e; p++)); do ports+=("$p"); done
+      else
+        ok=0
+      fi
+
+    elif [[ "$raw" =~ ^[0-9]+(,[0-9]+)+$ ]]; then
+      IFS=',' read -r -a parts <<<"$raw"
+      local part
+      for part in "${parts[@]}"; do
+        valid_port "$part" && ports+=("$part") || { ok=0; break; }
+      done
+    else
+      ok=0
+    fi
+
+    if ((ok==0)); then
+      add_log "Invalid ports: $raw"
+      continue
+    fi
+
+    mapfile -t REMOVE_PORT_LIST < <(printf "%s\n" "${ports[@]}" | awk '!seen[$0]++' | sort -n)
+    add_log "Ports to remove: ${REMOVE_PORT_LIST[*]}"
+    break
+  done
+
+  # Confirmation
+  while true; do
+    render
+    echo "┌─────────────────────────────────────────────────────────────────────┐"
+    echo "│                      CONFIRM PORT REMOVAL                          │"
+    echo "├─────────────────────────────────────────────────────────────────────┤"
+    printf "│ %-67s │\n" "GRE Tunnel: GRE${id}"
+    printf "│ %-67s │\n" "Ports to remove: ${REMOVE_PORT_LIST[*]}"
+    echo "└─────────────────────────────────────────────────────────────────────┘"
+    echo
+    echo "Type: YES (confirm)  or  NO (cancel)"
+    echo
+    local confirm=""
+    read -r -e -p "Confirm: " confirm
+    confirm="$(trim "$confirm")"
+
+    if [[ "$confirm" == "NO" || "$confirm" == "no" ]]; then
+      add_log "Port removal cancelled for GRE${id}"
+      return 0
+    fi
+    if [[ "$confirm" == "YES" ]]; then
+      break
+    fi
+    add_log "Please type YES or NO."
+  done
+
+  # Remove ports
+  haproxy_remove_ports_from_gre_cfg "$id" "${REMOVE_PORT_LIST[@]}" || { die_soft "Failed removing ports from haproxy-gre${id}.cfg"; return 0; }
+
+  # Validate HAProxy config
+  if command -v haproxy >/dev/null 2>&1; then
+    haproxy -c -f /etc/haproxy/haproxy.cfg -f /etc/haproxy/conf.d/ >/dev/null 2>&1
+    if [[ $? -ne 0 ]]; then
+      die_soft "HAProxy config validation failed (haproxy -c)."
+      return 0
+    fi
+  fi
+
+  # Restart HAProxy
+  if haproxy_unit_exists; then
+    add_log "Restarting HAProxy..."
+    render
+    systemctl restart haproxy >/dev/null 2>&1 || true
+    add_log "HAProxy restarted."
+  else
+    add_log "WARNING: haproxy.service not found; skipped restart."
+  fi
+
+  # Show remaining ports
+  local -a remaining_ports
+  mapfile -t remaining_ports < <(get_gre_ports "$id")
+
+  render
+  echo "┌─────────────────────────────────────────────────────────────────────┐"
+  echo "│                    PORT REMOVAL COMPLETED                          │"
+  echo "├─────────────────────────────────────────────────────────────────────┤"
+  printf "│ %-67s │\n" "GRE Tunnel: GRE${id}"
+  printf "│ %-67s │\n" "Removed ports: ${REMOVE_PORT_LIST[*]}"
+  if ((${#remaining_ports[@]} > 0)); then
+    printf "│ %-67s │\n" "Remaining ports: ${remaining_ports[*]}"
+  else
+    printf "│ %-67s │\n" "Remaining ports: (none)"
+  fi
+  echo "└─────────────────────────────────────────────────────────────────────┘"
+  echo
+  echo "---- STATUS (haproxy.service) ----"
+  systemctl status haproxy --no-pager 2>&1 | sed -n '1,16p'
+  echo "---------------------------------"
+  pause_enter
+}
+
 main_menu() {
   local choice=""
   while true; do
@@ -840,7 +1067,8 @@ main_menu() {
     echo "2 > KHAREJ SETUP"
     echo "3 > Services ManageMent"
     echo "4 > Unistall & Clean"
-	echo "5 > add tunnel port"
+    echo "5 > Add Tunnel Port"
+    echo "6 > Remove Tunnel Port"
     echo "0 > Exit"
     echo
     read -r -e -p "Select option: " choice
@@ -851,7 +1079,8 @@ main_menu() {
       2) add_log "Selected: KHAREJ SETUP"; kharej_setup ;;
       3) add_log "Selected: Services ManageMent"; services_management ;;
       4) add_log "Selected: Unistall & Clean"; uninstall_clean ;;
-	  5) add_log "Selected: add tunnel port"; add_tunnel_port ;;
+      5) add_log "Selected: add tunnel port"; add_tunnel_port ;;
+      6) add_log "Selected: remove tunnel port"; remove_tunnel_port ;;
       0) add_log "Bye!"; render; exit 0 ;;
       *) add_log "Invalid option: $choice" ;;
     esac
