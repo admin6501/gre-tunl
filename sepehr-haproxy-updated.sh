@@ -1626,6 +1626,7 @@ edit_traffic_limit() {
   local base_rx="${BASE_RX:-0}"
   local base_tx="${BASE_TX:-0}"
   local enabled="${ENABLED:-1}"
+  local calc_mode="${CALC_MODE:-both}"
   
   # Get current usage
   local traffic_info rx tx used_rx used_tx used
@@ -1635,7 +1636,13 @@ edit_traffic_limit() {
   used_tx=$((tx - base_tx))
   ((used_rx < 0)) && used_rx=0
   ((used_tx < 0)) && used_tx=0
-  used=$((used_rx + used_tx))
+  
+  # Calculate based on mode
+  case "$calc_mode" in
+    rx) used=$used_rx ;;
+    tx) used=$used_tx ;;
+    both|*) used=$((used_rx + used_tx)) ;;
+  esac
   
   local new_limit_gb=""
   while true; do
@@ -1644,6 +1651,7 @@ edit_traffic_limit() {
     echo "│                    EDIT TRAFFIC LIMIT - GRE${id}                      │"
     echo "├─────────────────────────────────────────────────────────────────────┤"
     printf "│ %-67s │\n" "Current Limit: $(bytes_to_human $old_limit_bytes)"
+    printf "│ %-67s │\n" "Current Mode: $(calc_mode_to_text $calc_mode)"
     printf "│ %-67s │\n" "Used So Far: $(bytes_to_human $used)"
     printf "│ %-67s │\n" "Status: $( [[ "$enabled" == "1" ]] && echo "ENABLED" || echo "DISABLED" )"
     echo "├─────────────────────────────────────────────────────────────────────┤"
@@ -1665,11 +1673,32 @@ edit_traffic_limit() {
     fi
   done
   
+  # Ask if user wants to change calculation mode
+  local change_mode=""
+  render
+  echo "Do you want to change the calculation mode?"
+  echo "Current: $(calc_mode_to_text $calc_mode)"
+  echo
+  echo "1) Keep current mode"
+  echo "2) Change to Download Only (RX)"
+  echo "3) Change to Upload Only (TX)"
+  echo "4) Change to Download + Upload (RX+TX)"
+  echo
+  read -r -e -p "Select (1-4): " change_mode
+  change_mode="$(trim "$change_mode")"
+  
+  case "$change_mode" in
+    2) calc_mode="rx" ;;
+    3) calc_mode="tx" ;;
+    4) calc_mode="both" ;;
+    *) ;; # Keep current
+  esac
+  
   local new_limit_bytes
   new_limit_bytes=$(gb_to_bytes "$new_limit_gb")
   
   # Save with same base values (keep counter)
-  save_limit_config "$id" "$new_limit_bytes" "$base_rx" "$base_tx" "$enabled"
+  save_limit_config "$id" "$new_limit_bytes" "$base_rx" "$base_tx" "$enabled" "$calc_mode"
   
   add_log "Traffic limit changed: $(bytes_to_human $old_limit_bytes) -> ${new_limit_gb} GB"
   
@@ -1680,6 +1709,7 @@ edit_traffic_limit() {
   printf "│ %-67s │\n" "Tunnel: GRE${id}"
   printf "│ %-67s │\n" "Old Limit: $(bytes_to_human $old_limit_bytes)"
   printf "│ %-67s │\n" "New Limit: ${new_limit_gb} GB"
+  printf "│ %-67s │\n" "Mode: $(calc_mode_to_text $calc_mode)"
   printf "│ %-67s │\n" "Used: $(bytes_to_human $used) (unchanged)"
   echo "└─────────────────────────────────────────────────────────────────────┘"
   pause_enter
