@@ -306,8 +306,8 @@ cat /etc/gre-limits/limit.log
 
 ## 📞 پشتیبانی
 
-- 🐛 **گزارش باگ:** [Issues](https://github.com/admin6501/gree-tunl/issues)
-- 💬 **سوالات:** [Discussions](https://github.com/admin6501/gree-tunl/discussions)
+- 🐛 **گزارش باگ:** [Issues](https://github.com/admin6501/gre-tunl/issues)
+- 💬 **سوالات:** [Discussions](https://github.com/admin6501/gre-tunl/discussions)
 
 ---
 
