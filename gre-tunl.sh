@@ -258,8 +258,11 @@ RemainAfterExit=yes
 ExecStart=/sbin/ip tunnel add gre${id} mode gre local ${local_ip} remote ${remote_ip} ttl 255 key ${key}
 ExecStart=/sbin/ip addr add ${local_gre_ip}/30 dev gre${id}
 ExecStart=/sbin/ip link set gre${id} up
+ExecStart=/sbin/ip link set gre${id} mtu 1400
 ExecStop=/sbin/ip link set gre${id} down
 ExecStop=/sbin/ip tunnel del gre${id}
+Restart=on-failure
+RestartSec=10
 
 [Install]
 WantedBy=multi-user.target
