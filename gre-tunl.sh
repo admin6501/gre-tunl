@@ -281,7 +281,7 @@ After=gre${id}.service
 
 [Service]
 Type=oneshot
-ExecStart=/bin/bash -c 'ping -c 1 -W 3 ${remote_gre_ip} >/dev/null 2>&1 || systemctl restart gre${id}.service'
+ExecStart=/bin/bash -c 'ping -c 3 -W 10 ${remote_gre_ip} >/dev/null 2>&1 || systemctl restart gre${id}.service'
 EOF
 
   cat >"$keepalive_timer" <<EOF
@@ -289,8 +289,8 @@ EOF
 Description=GRE${id} Tunnel Keepalive Timer
 
 [Timer]
-OnBootSec=60
-OnUnitActiveSec=30
+OnBootSec=120
+OnUnitActiveSec=60
 AccuracySec=10
 
 [Install]
@@ -299,7 +299,7 @@ EOF
 
   systemctl daemon-reload >/dev/null 2>&1
   systemctl enable --now "gre${id}-keepalive.timer" >/dev/null 2>&1
-  add_log "GRE${id} keepalive timer enabled (30s interval)"
+  add_log "GRE${id} keepalive timer enabled (60s interval)"
   
   return 0
 }
