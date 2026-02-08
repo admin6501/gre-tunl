@@ -237,18 +237,117 @@ make_gre_service() {
   local id="$1" local_ip="$2" remote_ip="$3" local_gre_ip="$4" key="$5" remote_gre_ip="$6"
   local unit="gre${id}.service"
   local path="/etc/systemd/system/${unit}"
+  local script_path="/usr/local/bin/gre${id}-tunnel.sh"
+  local watchdog_path="/usr/local/bin/gre${id}-watchdog.sh"
 
   if unit_exists "$unit"; then
     add_log "Service already exists: $unit"
     return 2
   fi
 
+  add_log "Creating GRE tunnel scripts..."
+  render
+
+  # Create tunnel management script
+  cat >"$script_path" <<EOF
+#!/bin/bash
+# GRE${id} Tunnel Management Script
+
+GRE_ID="${id}"
+LOCAL_IP="${local_ip}"
+REMOTE_IP="${remote_ip}"
+LOCAL_GRE_IP="${local_gre_ip}"
+REMOTE_GRE_IP="${remote_gre_ip}"
+KEY="${key}"
+IFACE="gre\${GRE_ID}"
+
+cleanup() {
+    ip link set \$IFACE down 2>/dev/null
+    ip tunnel del \$IFACE 2>/dev/null
+}
+
+setup_tunnel() {
+    cleanup
+    
+    ip tunnel add \$IFACE mode gre local \$LOCAL_IP remote \$REMOTE_IP ttl 255 key \$KEY
+    if [[ \$? -ne 0 ]]; then
+        echo "Failed to create tunnel"
+        return 1
+    fi
+    
+    ip addr add \${LOCAL_GRE_IP}/30 dev \$IFACE
+    ip link set \$IFACE mtu 1400
+    ip link set \$IFACE up
+    
+    echo "Tunnel \$IFACE is UP"
+    return 0
+}
+
+trap cleanup EXIT
+
+setup_tunnel || exit 1
+
+# Keep running and monitor
+while true; do
+    sleep 10
+    
+    # Check if interface exists
+    if ! ip link show \$IFACE >/dev/null 2>&1; then
+        echo "Interface \$IFACE disappeared, recreating..."
+        setup_tunnel || exit 1
+    fi
+done
+EOF
+
+  chmod +x "$script_path"
+
+  # Create watchdog script
+  cat >"$watchdog_path" <<EOF
+#!/bin/bash
+# GRE${id} Watchdog Script
+
+IFACE="gre${id}"
+REMOTE_GRE_IP="${remote_gre_ip}"
+FAIL_COUNT=0
+MAX_FAILS=3
+
+while true; do
+    sleep 30
+    
+    # Check if interface is up
+    if ! ip link show \$IFACE up 2>/dev/null | grep -q "UP"; then
+        echo "[\$(date)] Interface \$IFACE is DOWN"
+        systemctl restart gre${id}.service
+        sleep 10
+        continue
+    fi
+    
+    # Ping test
+    if ping -c 2 -W 5 \$REMOTE_GRE_IP >/dev/null 2>&1; then
+        FAIL_COUNT=0
+    else
+        ((FAIL_COUNT++))
+        echo "[\$(date)] Ping failed (\$FAIL_COUNT/\$MAX_FAILS)"
+        
+        if ((FAIL_COUNT >= MAX_FAILS)); then
+            echo "[\$(date)] Max failures reached, restarting tunnel..."
+            systemctl restart gre${id}.service
+            FAIL_COUNT=0
+            sleep 10
+        fi
+    fi
+done
+EOF
+
+  chmod +x "$watchdog_path"
+
+  # Create main service
   add_log "Creating: $path"
   render
 
   cat >"$path" <<EOF
 [Unit]
-Description=GRE Tunnel to (${remote_ip})
+Description=GRE Tunnel ${id} to ${remote_ip}
 After=network-online.target
 Wants=network-online.target
 StartLimitIntervalSec=0
@@ -256,17 +355,35 @@ StartLimitIntervalSec=0
 [Service]
 Type=simple
 Restart=always
-RestartSec=5
-ExecStartPre=-/sbin/ip tunnel del gre${id}
-ExecStartPre=-/sbin/ip link del gre${id}
-ExecStart=/bin/bash -c '/sbin/ip tunnel add gre${id} mode gre local ${local_ip} remote ${remote_ip} ttl 255 key ${key} && /sbin/ip addr add ${local_gre_ip}/30 dev gre${id} && /sbin/ip link set gre${id} mtu 1400 && /sbin/ip link set gre${id} up && while true; do sleep 30; if ! ping -c 3 -W 10 ${remote_gre_ip} >/dev/null 2>&1; then exit 1; fi; done'
+RestartSec=3
+ExecStart=${script_path}
 ExecStopPost=-/sbin/ip link set gre${id} down
 ExecStopPost=-/sbin/ip tunnel del gre${id}
+TimeoutStopSec=10
 
 [Install]
 WantedBy=multi-user.target
 EOF
 
+  # Create watchdog service
+  cat >"/etc/systemd/system/gre${id}-watchdog.service" <<EOF
+[Unit]
+Description=GRE Tunnel ${id} Watchdog
+After=gre${id}.service
+Requires=gre${id}.service
+
+[Service]
+Type=simple
+Restart=always
+RestartSec=5
+ExecStart=${watchdog_path}
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+  systemctl daemon-reload >/dev/null 2>&1
+  
   [[ $? -eq 0 ]] && add_log "GRE service created: $unit" || return 1
   
   return 0
