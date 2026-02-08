@@ -139,7 +139,7 @@ ask_until_valid() {
 }
 
 ask_ports() {
-  local prompt="ForWard PORT (80 | 80,2053 | 2050-2060):"
+  local prompt="Forward PORT (80 | 80,2053 | 2050-2060):"
   local raw=""
   while true; do
     render
