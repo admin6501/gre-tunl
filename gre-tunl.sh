@@ -234,7 +234,7 @@ show_unit_status_brief() {
 }
 
 make_gre_service() {
-  local id="$1" local_ip="$2" remote_ip="$3" local_gre_ip="$4" key="$5"
+  local id="$1" local_ip="$2" remote_ip="$3" local_gre_ip="$4" key="$5" remote_gre_ip="$6"
   local unit="gre${id}.service"
   local path="/etc/systemd/system/${unit}"
 
