@@ -751,7 +751,6 @@ frontend gre${id}_fe_${p}
     default_backend gre${id}_be_${p}
 
 backend gre${id}_be_${p}
-    option tcp-check
     server gre${id}_b_${p} ${target_ip}:${p}
 EOF
 
