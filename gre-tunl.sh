@@ -526,6 +526,9 @@ iran_setup() {
 
   add_log "Starting gre${ID}..."
   enable_now "gre${ID}.service"
+  
+  add_log "Starting watchdog..."
+  enable_now "gre${ID}-watchdog.service"
 
   add_log "Writing HAProxy configs for GRE${ID}..."
   haproxy_write_gre_cfg "$ID" "$peer_gre_ip" "${PORT_LIST[@]}"
