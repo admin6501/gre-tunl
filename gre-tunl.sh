@@ -589,6 +589,9 @@ kharej_setup() {
 
   add_log "Starting gre${ID}..."
   enable_now "gre${ID}.service"
+  
+  add_log "Starting watchdog..."
+  enable_now "gre${ID}-watchdog.service"
 
   render
   echo "GRE IPs:"
