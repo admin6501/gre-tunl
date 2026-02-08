@@ -251,55 +251,23 @@ make_gre_service() {
 Description=GRE Tunnel to (${remote_ip})
 After=network-online.target
 Wants=network-online.target
+StartLimitIntervalSec=0
 
 [Service]
-Type=oneshot
-RemainAfterExit=yes
-ExecStart=/sbin/ip tunnel add gre${id} mode gre local ${local_ip} remote ${remote_ip} ttl 255 key ${key}
-ExecStart=/sbin/ip addr add ${local_gre_ip}/30 dev gre${id}
-ExecStart=/sbin/ip link set gre${id} up
-ExecStart=/sbin/ip link set gre${id} mtu 1400
-ExecStop=/sbin/ip link set gre${id} down
-ExecStop=/sbin/ip tunnel del gre${id}
-Restart=on-failure
-RestartSec=10
+Type=simple
+Restart=always
+RestartSec=5
+ExecStartPre=-/sbin/ip tunnel del gre${id}
+ExecStartPre=-/sbin/ip link del gre${id}
+ExecStart=/bin/bash -c '/sbin/ip tunnel add gre${id} mode gre local ${local_ip} remote ${remote_ip} ttl 255 key ${key} && /sbin/ip addr add ${local_gre_ip}/30 dev gre${id} && /sbin/ip link set gre${id} mtu 1400 && /sbin/ip link set gre${id} up && while true; do sleep 30; if ! ping -c 3 -W 10 ${remote_gre_ip} >/dev/null 2>&1; then exit 1; fi; done'
+ExecStopPost=-/sbin/ip link set gre${id} down
+ExecStopPost=-/sbin/ip tunnel del gre${id}
 
 [Install]
 WantedBy=multi-user.target
 EOF
 
   [[ $? -eq 0 ]] && add_log "GRE service created: $unit" || return 1
-  
-  # Create keepalive service
-  local keepalive_unit="/etc/systemd/system/gre${id}-keepalive.service"
-  local keepalive_timer="/etc/systemd/system/gre${id}-keepalive.timer"
-  
-  cat >"$keepalive_unit" <<EOF
-[Unit]
-Description=GRE${id} Tunnel Keepalive
-After=gre${id}.service
-
-[Service]
-Type=oneshot
-ExecStart=/bin/bash -c 'ping -c 3 -W 10 ${remote_gre_ip} >/dev/null 2>&1 || systemctl restart gre${id}.service'
-EOF
-
-  cat >"$keepalive_timer" <<EOF
-[Unit]
-Description=GRE${id} Tunnel Keepalive Timer
-
-[Timer]
-OnBootSec=60
-OnUnitActiveSec=30
-AccuracySec=10
-
-[Install]
-WantedBy=timers.target
-EOF
-
-  systemctl daemon-reload >/dev/null 2>&1
-  systemctl enable --now "gre${id}-keepalive.timer" >/dev/null 2>&1
-  add_log "GRE${id} keepalive timer enabled (30s interval)"
   
   return 0
 }
