@@ -269,6 +269,38 @@ WantedBy=multi-user.target
 EOF
 
   [[ $? -eq 0 ]] && add_log "GRE service created: $unit" || return 1
+  
+  # Create keepalive service
+  local keepalive_unit="/etc/systemd/system/gre${id}-keepalive.service"
+  local keepalive_timer="/etc/systemd/system/gre${id}-keepalive.timer"
+  
+  cat >"$keepalive_unit" <<EOF
+[Unit]
+Description=GRE${id} Tunnel Keepalive
+After=gre${id}.service
+
+[Service]
+Type=oneshot
+ExecStart=/bin/bash -c 'ping -c 1 -W 3 ${remote_gre_ip} >/dev/null 2>&1 || systemctl restart gre${id}.service'
+EOF
+
+  cat >"$keepalive_timer" <<EOF
+[Unit]
+Description=GRE${id} Tunnel Keepalive Timer
+
+[Timer]
+OnBootSec=60
+OnUnitActiveSec=30
+AccuracySec=10
+
+[Install]
+WantedBy=timers.target
+EOF
+
+  systemctl daemon-reload >/dev/null 2>&1
+  systemctl enable --now "gre${id}-keepalive.timer" >/dev/null 2>&1
+  add_log "GRE${id} keepalive timer enabled (30s interval)"
+  
   return 0
 }
 
