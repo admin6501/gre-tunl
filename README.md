@@ -70,15 +70,7 @@
 ### نصب با یک دستور
 
 ```bash
-sudo bash <(curl -fsSL https://raw.githubusercontent.com/admin6501/gre-tunl/main/gre-tunl.sh)
-```
-
-### کلون ریپازیتوری
-
-```bash
-git clone https://github.com/admin6501/gre-tunl.git
-cd gre-tunl
-sudo bash gre-tunl.sh
+sudo bash <(curl -fsSL https://raw.githubusercontent.com/admin6501/gree-tunl/refs/heads/main/gre-tunl.sh)
 ```
 
 ---
