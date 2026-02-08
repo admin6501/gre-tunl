@@ -799,14 +799,26 @@ uninstall_clean() {
 
   add_log "Stopping gre${id}.service"
   systemctl stop "gre${id}.service" >/dev/null 2>&1 || true
-  add_log "Disabling gre${id}.service"
+  systemctl stop "gre${id}-watchdog.service" >/dev/null 2>&1 || true
+  
+  add_log "Disabling services..."
   systemctl disable "gre${id}.service" >/dev/null 2>&1 || true
+  systemctl disable "gre${id}-watchdog.service" >/dev/null 2>&1 || true
 
-  add_log "Removing unit file..."
+  add_log "Removing unit files..."
   rm -f "/etc/systemd/system/gre${id}.service" >/dev/null 2>&1 || true
+  rm -f "/etc/systemd/system/gre${id}-watchdog.service" >/dev/null 2>&1 || true
+
+  add_log "Removing tunnel scripts..."
+  rm -f "/usr/local/bin/gre${id}-tunnel.sh" >/dev/null 2>&1 || true
+  rm -f "/usr/local/bin/gre${id}-watchdog.sh" >/dev/null 2>&1 || true
 
   add_log "Removing HAProxy GRE config..."
   rm -f "/etc/haproxy/conf.d/haproxy-gre${id}.cfg" >/dev/null 2>&1 || true
+
+  add_log "Cleaning up tunnel interface..."
+  ip link set "gre${id}" down 2>/dev/null || true
+  ip tunnel del "gre${id}" 2>/dev/null || true
 
   add_log "Reloading systemd..."
   systemctl daemon-reload >/dev/null 2>&1 || true
