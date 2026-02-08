@@ -70,7 +70,7 @@
 ### نصب با یک دستور
 
 ```bash
-sudo bash <(curl -fsSL https://raw.githubusercontent.com/admin6501/gree-tunl/refs/heads/main/gre-tunl.sh)
+sudo bash <(curl -fsSL https://raw.githubusercontent.com/admin6501/gre-tunl/refs/heads/main/gre-tunl.sh)
 ```
 
 ---
