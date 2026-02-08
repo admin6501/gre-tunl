@@ -491,7 +491,7 @@ kharej_setup() {
 
   ensure_iproute_only || { die_soft "Package installation failed (iproute2)."; return 0; }
 
-  make_gre_service "$ID" "$KHAREJIP" "$IRANIP" "$local_gre_ip" "$key"
+  make_gre_service "$ID" "$KHAREJIP" "$IRANIP" "$local_gre_ip" "$key" "$peer_gre_ip"
   local rc=$?
   [[ $rc -eq 2 ]] && return 0
   [[ $rc -ne 0 ]] && { die_soft "Failed creating GRE service."; return 0; }
