@@ -289,8 +289,8 @@ EOF
 Description=GRE${id} Tunnel Keepalive Timer
 
 [Timer]
-OnBootSec=120
-OnUnitActiveSec=60
+OnBootSec=60
+OnUnitActiveSec=30
 AccuracySec=10
 
 [Install]
@@ -299,7 +299,7 @@ EOF
 
   systemctl daemon-reload >/dev/null 2>&1
   systemctl enable --now "gre${id}-keepalive.timer" >/dev/null 2>&1
-  add_log "GRE${id} keepalive timer enabled (60s interval)"
+  add_log "GRE${id} keepalive timer enabled (30s interval)"
   
   return 0
 }
