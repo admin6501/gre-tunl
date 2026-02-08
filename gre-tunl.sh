@@ -325,7 +325,7 @@ frontend gre${id}_fe_${p}
 
 backend gre${id}_be_${p}
     option tcp-check
-    server gre${id}_b_${p} ${target_ip}:${p} check
+    server gre${id}_b_${p} ${target_ip}:${p}
 
 EOF
   done
@@ -753,7 +753,7 @@ frontend gre${id}_fe_${p}
 
 backend gre${id}_be_${p}
     option tcp-check
-    server gre${id}_b_${p} ${target_ip}:${p} check
+    server gre${id}_b_${p} ${target_ip}:${p}
 EOF
 
     add_log "Added: GRE${id} port ${p} -> ${target_ip}:${p}"
